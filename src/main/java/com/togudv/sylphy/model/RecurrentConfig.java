@@ -9,13 +9,8 @@ import java.util.Set;
 @Data
 public class RecurrentConfig {
     private Set<Frequency> frequencyType;
-    private Integer interval;           // cada X unidades
+    private Integer recurrenceInterval; // cada X unidades
     private Set<DayOfWeek> daysOfWeek;  // solo para WEEKLY
     private Set<Integer> daysOfMonth;
     private Integer occurrences;
 }
-
-enum Frequency {
-    MINUTELY, HOURLY, DAILY, WEEKLY, MONTHLY, YEARLY
-}
-

@@ -6,6 +6,8 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.util.NoSuchElementException;
+
 @Service
 @Transactional
 public class ReminderService {
@@ -21,9 +23,14 @@ public class ReminderService {
         return repository.findAll();
     }
 
-    public void updateById(Long id, ) {
-        Long id = reminder.getId();
-        repository.findById(id);
+    public Reminder updateById(Long id, Reminder updated) {
+        Reminder existing = repository.findById(id)
+                .orElseThrow(() -> new NoSuchElementException("Reminder no encontrado: " + id));
+        existing.setName(updated.getName());
+        existing.setDescription(updated.getDescription());
+        existing.setNextDate(updated.getNextDate());
+        existing.setRecurrentConfig(updated.getRecurrentConfig());
+        return repository.save(existing);
     }
 
     public void deleteById(Long id) {

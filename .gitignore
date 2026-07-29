@@ -1,3 +1,5 @@
+.env
+AGENTS.md
 HELP.md
 .gradle
 build/

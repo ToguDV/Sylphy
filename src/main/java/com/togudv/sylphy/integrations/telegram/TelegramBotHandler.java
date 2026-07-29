@@ -3,6 +3,7 @@ package com.togudv.sylphy.integrations.telegram;
 import com.togudv.sylphy.service.AIService;
 import com.togudv.sylphy.service.ReminderService;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 import org.telegram.telegrambots.client.okhttp.OkHttpTelegramClient;
 import org.telegram.telegrambots.longpolling.BotSession;
@@ -18,6 +19,7 @@ import org.telegram.telegrambots.meta.generics.TelegramClient;
 @Component
 public class TelegramBotHandler implements SpringLongPollingBot, LongPollingSingleThreadUpdateConsumer {
     private final TelegramClient telegramClient;
+    private final String botToken;
 
     @Autowired
     private ReminderService reminderService;
@@ -25,13 +27,14 @@ public class TelegramBotHandler implements SpringLongPollingBot, LongPollingSing
     @Autowired
     private AIService aiService;
 
-    public TelegramBotHandler() {
-        telegramClient = new OkHttpTelegramClient(getBotToken());
+    public TelegramBotHandler(@Value("${telegram.bot.token:}") String botToken) {
+        this.botToken = botToken;
+        this.telegramClient = new OkHttpTelegramClient(botToken);
     }
 
     @Override
     public String getBotToken() {
-        return "8854762136:AAE4IMZU_ENA0ym74YBo_RV9GcHKPxQNiII";
+        return botToken;
     }
     @Override
     public LongPollingUpdateConsumer getUpdatesConsumer() {

@@ -88,6 +88,6 @@ class NextDateCalculatorTest {
             cfg.setFrequencyType(frequency);
             cfg.setRecurrenceInterval(interval);
         }
-        return new Reminder(null, "test", null, nextDate, nextDate, cfg);
+        return new Reminder(null, "test", null, nextDate, nextDate, cfg, null);
     }
 }

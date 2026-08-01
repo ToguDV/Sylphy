@@ -47,8 +47,8 @@ class ReminderSchedulerTest {
 
     @Test
     void dispatchesEveryDueReminder_andAdvances() {
-        Reminder r1 = new Reminder(1L, "a", null, LocalDateTime.now(), LocalDateTime.now(), null);
-        Reminder r2 = new Reminder(2L, "b", null, LocalDateTime.now(), LocalDateTime.now(), null);
+        Reminder r1 = new Reminder(1L, "a", null, LocalDateTime.now(), LocalDateTime.now(), null, null);
+        Reminder r2 = new Reminder(2L, "b", null, LocalDateTime.now(), LocalDateTime.now(), null, null);
         when(repository.findByNextDateLessThanEqual(any())).thenReturn(List.of(r1, r2));
 
         scheduler.tick();
@@ -61,7 +61,7 @@ class ReminderSchedulerTest {
 
     @Test
     void dispatcherFailure_isLoggedAndSkipsAdvance() {
-        Reminder r1 = new Reminder(1L, "a", null, LocalDateTime.now(), LocalDateTime.now(), null);
+        Reminder r1 = new Reminder(1L, "a", null, LocalDateTime.now(), LocalDateTime.now(), null, null);
         when(repository.findByNextDateLessThanEqual(any())).thenReturn(List.of(r1));
         doThrow(new NotificationDeliveryException("boom", new RuntimeException()))
                 .when(dispatcher).dispatch(r1);
@@ -74,7 +74,7 @@ class ReminderSchedulerTest {
 
     @Test
     void advanceFailure_isLoggedAndDoesNotPropagate() {
-        Reminder r1 = new Reminder(1L, "a", null, LocalDateTime.now(), LocalDateTime.now(), null);
+        Reminder r1 = new Reminder(1L, "a", null, LocalDateTime.now(), LocalDateTime.now(), null, null);
         when(repository.findByNextDateLessThanEqual(any())).thenReturn(List.of(r1));
         doThrow(new IllegalArgumentException("bad config"))
                 .when(reminderService).advanceAfterFire(1L);
@@ -87,7 +87,7 @@ class ReminderSchedulerTest {
 
     @Test
     void noSuchElementOnAdvance_isLoggedAndDoesNotPropagate() {
-        Reminder r1 = new Reminder(1L, "a", null, LocalDateTime.now(), LocalDateTime.now(), null);
+        Reminder r1 = new Reminder(1L, "a", null, LocalDateTime.now(), LocalDateTime.now(), null, null);
         when(repository.findByNextDateLessThanEqual(any())).thenReturn(List.of(r1));
         doThrow(new NoSuchElementException("vanished"))
                 .when(reminderService).advanceAfterFire(1L);

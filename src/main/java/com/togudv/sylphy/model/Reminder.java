@@ -25,4 +25,6 @@ public class Reminder {
     private LocalDateTime nextDate;
     @Embedded
     private RecurrentConfig recurrentConfig;
+    @Column(length = 1000)
+    private String notificationMessage;
 }

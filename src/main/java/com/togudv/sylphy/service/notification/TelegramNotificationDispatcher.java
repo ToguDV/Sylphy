@@ -2,6 +2,7 @@ package com.togudv.sylphy.service.notification;
 
 import com.togudv.sylphy.config.NotificationDestination;
 import com.togudv.sylphy.model.Reminder;
+import com.togudv.sylphy.service.ReminderMessageComposer;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
@@ -16,12 +17,14 @@ public class TelegramNotificationDispatcher implements NotificationDispatcher {
 
     private final TelegramClient telegramClient;
     private final NotificationDestination destination;
+    private final ReminderMessageComposer composer;
 
     @Override
     public void dispatch(Reminder reminder) {
+        String text = resolveText(reminder);
         SendMessage message = SendMessage.builder()
                 .chatId(destination.value())
-                .text(format(reminder))
+                .text(text)
                 .build();
         try {
             telegramClient.execute(message);
@@ -33,6 +36,25 @@ public class TelegramNotificationDispatcher implements NotificationDispatcher {
                     "Fallo al enviar notificacion Telegram para recordatorio id="
                             + reminder.getId(), e);
         }
+    }
+
+    private String resolveText(Reminder r) {
+        try {
+            String composed = composer.compose(r);
+            if (composed != null && !composed.isBlank()) {
+                return composed.trim();
+            }
+            log.warn("telegram: composer devolvio mensaje vacio para recordatorio id={}, usando fallback",
+                    r.getId());
+        } catch (RuntimeException e) {
+            log.warn("telegram: fallo al redactar mensaje para recordatorio id={}, usando fallback",
+                    r.getId(), e);
+        }
+        String persisted = r.getNotificationMessage();
+        if (persisted != null && !persisted.isBlank()) {
+            return persisted;
+        }
+        return format(r);
     }
 
     private static String format(Reminder r) {

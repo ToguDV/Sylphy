@@ -3,6 +3,7 @@ package com.togudv.sylphy.integrations.telegram;
 import com.togudv.sylphy.service.AIService;
 import com.togudv.sylphy.service.ReminderService;
 import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 import org.telegram.telegrambots.longpolling.BotSession;
@@ -15,6 +16,7 @@ import org.telegram.telegrambots.meta.api.objects.Update;
 import org.telegram.telegrambots.meta.exceptions.TelegramApiException;
 import org.telegram.telegrambots.meta.generics.TelegramClient;
 
+@Slf4j
 @Component
 public class TelegramBotHandler implements SpringLongPollingBot, LongPollingSingleThreadUpdateConsumer {
     private final TelegramClient telegramClient;
@@ -47,33 +49,31 @@ public class TelegramBotHandler implements SpringLongPollingBot, LongPollingSing
 
     @Override
     public void consume(Update update) {
-        System.out.println("Got message");
+        log.info("telegram: update recibido");
         if (update.hasMessage() && update.getMessage().hasText()) {
-            String message_text = update.getMessage().getText();
-            System.out.println(message_text);
-            long chat_id = update.getMessage().getChatId();
-            System.out.println("chatid"+chat_id);
+            String messageText = update.getMessage().getText();
+            long chatId = update.getMessage().getChatId();
+            log.info("telegram: mensaje de chat {}: {}", chatId, messageText);
 
-            String output = aiService.generate(message_text);
+            String output = aiService.generate(messageText);
 
             SendMessage message = SendMessage
                     .builder()
-                    .chatId(chat_id)
+                    .chatId(chatId)
                     .text(output)
                     .build();
             try {
-                System.out.println("Trying to send message");
                 telegramClient.execute(message);
-                System.out.println("Message send");
+                log.info("telegram: respuesta enviada a chat {}", chatId);
             } catch (TelegramApiException e) {
-                e.printStackTrace();
+                log.error("telegram: fallo al enviar respuesta a chat {}", chatId, e);
             }
         }
     }
 
     @AfterBotRegistration
     public void afterRegistration(BotSession botSession) {
-        System.out.println("Registered bot running state is: " + botSession.isRunning());
+        log.info("telegram: bot registrado, running={}", botSession.isRunning());
     }
 
 }

@@ -81,8 +81,9 @@ Do not implement Phase 2-4 as speculative abstractions during Phase 1. Instead, 
 | Persistence | Spring Data JPA + H2 (in-memory) | No migrations, no external DB. |
 | Validation | `spring-boot-starter-validation` | Jakarta Bean Validation. |
 | Boilerplate | Lombok | Partial usage — see Conventions. |
-| Mapping | MapStruct 1.6.3 | Declared on classpath but **no `@Mapper` interfaces exist yet**. |
-| Test | JUnit 5 (Jupiter) | `useJUnitPlatform()` in `build.gradle:54`. |
+| Mapping | MapStruct 1.6.3 | `mapper/ReminderMapper` — DTO ↔ entity (`componentModel = "spring"`). |
+| API docs | springdoc-openapi 3.1.0 | Swagger UI at `/swagger-ui.html`, spec at `/v3/api-docs`. |
+| Test | JUnit 5 (Jupiter) | `useJUnitPlatform()` in `build.gradle:54`. JaCoCo wired into `./gradlew check`. |
 
 ---
 
@@ -96,6 +97,7 @@ com.togudv.sylphy
 ├── service/            # Business logic
 │   └── tools/          # Spring AI @Tool implementations exposed to the LLM
 ├── repository/         # Spring Data JPA
+├── mapper/             # MapStruct DTO ↔ entity mappers
 ├── dto/                # API contract types (Java records)
 ├── model/              # JPA entities + @Embeddable value objects
 ├── integrations/
@@ -112,6 +114,7 @@ This is **layered architecture**, not hexagonal. Do not refactor to ports/adapte
 - **Interface-based tool registry**: implement `AITool` (`getName()`) to add new tools.
 - **JPA aggregate**: `Reminder` is the root; `RecurrentConfig` is `@Embedded` (not a separate entity).
 - **Constructor injection** is the preferred style. Field injection exists in legacy code (see Conventions).
+- **REST contract + RFC 7807**: `ReminderController` returns DTO records via `ReminderMapper`; errors bubble up as domain exceptions (`NoSuchElementException`, `IllegalArgumentException`) and `GlobalExceptionHandler` translates them into `ProblemDetail` (404/400) with `properties.errors` for validation failures. `@Valid` on every request body.
 - **Notification destination is config, not data.** A single `NotificationDestination` bean reads `telegram.notification.chat-id` from properties and is injected wherever a destination is needed. The `Reminder` entity carries no per-channel fields. When a second channel or a second user appears, this provider is refactored — the entity stays untouched.
 
 ### Notification destination (target)
@@ -142,21 +145,23 @@ This is **layered architecture**, not hexagonal. Do not refactor to ports/adapte
 
 ### ✅ Works (verified by code inspection)
 
-- `./gradlew compileJava` succeeds; the project **compiles** end-to-end.
+- `./gradlew build` succeeds: compile + tests + spotbugs (main+test) + JaCoCo all green.
 - Gradle build configuration is consistent; wrapper resolves.
 - `Reminder` + `RecurrentConfig` + `Frequency` form a coherent aggregate.
 - `ReminderRepository extends CrudRepository<Reminder, Long>` is valid.
-- `ReminderService.updateById` properly loads the existing entity, applies the patch, and saves; throws `NoSuchElementException` when the id is missing.
-- `ReminderAITool.createReminder` constructs `Reminder` with the matching 6-arg ctor (`id=null, recurrentConfig=null`).
-- Telegram bot message loop is wired: text → `AIService.generate` → reply.
+- `ReminderService` full CRUD (`getAll`, `getById`, `create`, `updateById` — loads existing, applies the patch, saves, throws `NoSuchElementException` when missing —, `deleteById`) plus `advanceAfterFire` with the `occurrences` cap (last fire deletes the reminder).
+- `ReminderAITool.createReminder` constructs `Reminder` with the matching 7-arg ctor (`id=null`), builds `RecurrentConfig.of(...)` only when `frequencyType != null`, and validates `name`/`creationDate`/`remindDate` deterministically.
+- `mapper/ReminderMapper` (MapStruct) maps DTO ↔ entity; `creationDate` is server-assigned on create and ignored on update.
+- REST contract at `/api/reminders` with `@Valid` bodies and RFC 7807 `ProblemDetail` errors via `GlobalExceptionHandler`.
+- OpenAPI docs: Swagger UI at `/swagger-ui.html`, spec at `/v3/api-docs`.
+- Telegram bot message loop is wired: text → `AIService.generate` → reply; all logging via SLF4J (`@Slf4j`), no `System.out`.
 - `AIService` builds a `ChatClient` with tools correctly.
 - `application.properties` is syntactically valid; Mistral config is active.
 - **Secrets are externalized.** `telegram.bot.token` and `spring.ai.openai.api-key` resolve from env vars (`TELEGRAM_BOT_TOKEN`, `SPRING_AI_OPENAI_API_KEY`) with empty defaults — nothing sensitive is hardcoded. A `.env` file at the project root is picked up via `spring.config.import=optional:file:.env[.properties]`. `TelegramBotHandler` injects the token with `@Value("${telegram.bot.token:}")` (constructor-injected).
 
 ### ❌ Still broken — fix before any feature work
 
-- `ReminderController` `@GetMapping("/ ")` — path contains a stray space; the endpoint is effectively dead.
-- `TelegramBotHandler.consume` (`TelegramBotHandler.java:46-71`) — still uses `System.out.println` for log lines and an `e.printStackTrace()` for the catch block. Cosmetic, but it conflicts with the SLF4J convention and blocks TODO item #10.
+- `ReminderController` `@GetMapping("/ ")` dead endpoint and the `System.out.println` / `e.printStackTrace()` logging in `TelegramBotHandler` are **fixed** (see TODO #5 and #10 below).
 - **Historical secret leak (informational, not a code fix).** The initial commit (`0ee3e35`) hardcoded real Telegram bot and Mistral API keys. The keys were rotated; do not reintroduce secrets into source or configuration committed to git.
 
 ### 📋 Missing (priority-ordered TODO for MVP)
@@ -165,17 +170,17 @@ This is **layered architecture**, not hexagonal. Do not refactor to ports/adapte
 1. ~~Wire `NotificationDestination` provider (constructor-injected, reads `telegram.notification.chat-id`) and inject it into the dispatcher. The entity stays free of per-channel fields.~~ ✅ Provider done (`config/NotificationDestination` + `TelegramNotificationDestination`, constructor-injected, fails fast on missing `chat-id`). The "inject into dispatcher" half lands with TODO #3.
 2. ~~Implement scheduler: `@EnableScheduling` + logic to read `RecurrentConfig`, compute next fire time, update `nextDate`, and trigger notification.~~ ✅ Done end-to-end. `service/NextDateCalculator` (pure function `next(Reminder)`, anchor + N units, throws on missing `frequencyType` or invalid `interval`, returns `null` to signal "one-shot → delete"); `service/ReminderScheduler` (`@Scheduled(fixedDelayString="${sylphy.scheduler.tick-millis:60000}")`); `service/notification/NotificationDispatcher` interface + `TelegramNotificationDispatcher` (real `SendMessage` via `TelegramClient.execute`, errors wrapped in `NotificationDeliveryException`); `integrations/telegram/TelegramConfig` provides the `TelegramClient` bean and `TelegramBotHandler` was refactored to inject it; `ReminderService.advanceAfterFire(id)` does the "compute next or delete" step inside a transaction; `ReminderRepository.findByNextDateLessThanEqual(now)` derived query; `SylphyApplication` enables scheduling and dropped three dead imports; `application.properties` adds `sylphy.scheduler.tick-millis=60000`. Test coverage: 5 in `ReminderSchedulerTest`, 11 in `NextDateCalculatorTest`, 3 in `TelegramNotificationDispatcherTest`. `./gradlew build` (compile + test + spotbugs main+test) green. Side-effect refactors: `RecurrentConfig.frequencyType` (and the DTO field) changed from `Set<Frequency>` to `Frequency` (the set was incoherent with the calculator's strict semantics); `daysOfWeek` / `daysOfMonth` removed from `RecurrentConfig` and the DTO (the chosen `anchor + N units` algorithm does not consume them — keeping them would have been a dead-field smell; if multi-day semantics are needed later, that is a separate design + a new `NextDateCalculator` algorithm).
 3. Implement notification dispatcher (Telegram client push from a scheduled task). Will consume `NotificationDestination` (TODO #1) at that point. ✅ Done as a side-effect of TODO #2: `TelegramNotificationDispatcher` does the real `SendMessage` push and reads `NotificationDestination` for the chat id.
-4. Wire `createReminder` AI tool to populate `RecurrentConfig` correctly (the `isRecurrent` boolean is currently dropped; the `RecurrentConfig` argument is passed as `null`).
-5. Implement real CRUD endpoints in `ReminderController` (GET list, GET by id, POST, PUT, DELETE).
-6. Add a DTO ↔ entity mapper. MapStruct is already on the classpath — write the `@Mapper` interface.
+4. ~~Wire `createReminder` AI tool to populate `RecurrentConfig` correctly (the `isRecurrent` boolean is currently dropped; the `RecurrentConfig` argument is passed as `null`).~~ ✅ Done. `ReminderAITool.createReminder` now takes `Frequency frequencyType`, `Integer recurrenceInterval`, `Integer occurrences` (ToolParams en español); construye `RecurrentConfig.of(...)` solo cuando `frequencyType != null` (config `null` = recordatorio de una sola vez) y lo pasa al ctor de 7-arg. La validación de frontera (freq obligatoria si hay config, `recurrenceInterval` default `1` y `>= 1`, `occurrences` si está definido `>= 1`) vive en `ReminderService.create` vía `validateRecurrence` (reutilizable por el REST #5 y por #13), no en el tool. `RecurrentConfig` ganó un `static of(...)` de conveniencia (Lombok `@Data` no generaba ctor con args). Tests: 5 en `ReminderAIToolTest`, 9 en `ReminderServiceTest`. `./gradlew build` verde.
+5. ~~Implement real CRUD endpoints in `ReminderController` (GET list, GET by id, POST, PUT, DELETE).~~ ✅ Done. `ReminderController` now exposes `GET /api/reminders` (list), `GET /api/reminders/{id}`, `POST /api/reminders` (201, `creationDate` es asignado por el mapper al servidor, nunca viene del cliente), `PUT /api/reminders/{id}` (reemplazo completo de `name`, `description`, `nextDate`, `recurrentConfig`, `notificationMessage`; `creationDate` se conserva) y `DELETE /api/reminders/{id}` (204). El endpoint muerto `@GetMapping("/ ")` fue eliminado. `ReminderService` ganó `getById(id)` (lanza `NoSuchElementException`) y `updateById` ahora valida recurrencia y copia `notificationMessage`. Tests: 13 en `ReminderControllerTest` (MockMvc standalone + advice).
+6. ~~Add a DTO ↔ entity mapper. MapStruct is already on the classpath — write the `@Mapper` interface.~~ ✅ Done. `mapper/ReminderMapper` (`@Mapper(componentModel = "spring")`): `toEntity(CreateReminderDTO)` (ignora `id`, setea `creationDate = now`), `toEntity(UpdateReminderDTO)` (ignora `id` y `creationDate`), `toDto(Reminder)`, `toRecurrentConfigDto(RecurrentConfig)`. El impl generado usa el ctor de 7-arg de `Reminder`, que ahora es manual (no Lombok) y acepta `creationDate` nullable solo para el path de update (justificado con `@SuppressFBWarnings` EI2/NP). Tests: 5 en `ReminderMapperTest`.
 7. ~~Stop leaking the JPA `RecurrentConfig` through `CreateReminderDTO`; create a parallel `RecurrentConfigDTO`.~~ ✅ Done. `dto/RecurrentConfigDTO` is a record; `CreateReminderDTO.recurrentConfig` is now typed as the DTO. (The compact-constructor `Set.copyOf` was dropped together with the `daysOfWeek` / `daysOfMonth` removal in TODO #2.)
-8. Add `@ControllerAdvice` for RFC 7807 problem-details error responses.
-9. Add `@Valid` on every controller request body and parameter validation on `@Tool` methods.
-10. Replace `System.out.println` with SLF4J (`@Slf4j`).
-11. Add tests. Project has 0% business-logic coverage. *(Initial seed: `TelegramNotificationDestinationTest` covers the chat-id validation contract. TODO #2 added 19 more: `ReminderSchedulerTest`, `NextDateCalculatorTest`, `TelegramNotificationDispatcherTest`.)*
-12. Add OpenAPI/springdoc when the REST surface stabilizes.
-13. Make `RecurrentConfig.occurrences` cap the total number of fires of a recurring reminder. Today the field exists in the model but is read by nothing: a recurrent reminder with `occurrences = N` keeps firing forever. The next `nextDate` is already computed by `NextDateCalculator`; the missing piece is the "have we used all our shots?" check. Implementation sketch: in `ReminderService.advanceAfterFire(id)`, if `recurrentConfig.occurrences != null`, decrement it on each fire; when it would reach `0` (i.e. before the last fire decrements it, or after — pick one and document), do not compute a next `nextDate` and `repository.delete(r)` instead. `occurrences == null` keeps the current "infinite" behaviour. Validate at the boundary (creation in `ReminderService.create` or in the AI tool TODO #4) that `occurrences`, if set, is `>= 1`. Add tests covering: `occurrences = 1` (fires once, deleted), `occurrences = N` (fires exactly N times), `occurrences = null` (infinite — current behaviour), and the validation rejection.
-14. Configure JaCoCo and bring test coverage up. Today the project has no coverage tool wired — the "0% business-logic coverage" claim in TODO #11 is qualitative. (a) Add the `jacoco` plugin to `build.gradle` and wire `jacocoTestReport` to produce an HTML report under `build/reports/jacoco`. Decide whether to fold it into `./gradlew check` or document it as a separate `./gradlew jacocoTestReport` task. (b) Identify gaps before adding tests — at minimum: `ReminderService` CRUD (`create`, `getAll`, `updateById`, `deleteById`) has no direct tests, `ReminderAITool` is uncovered, `AIService` is uncovered, `TelegramBotHandler.consume` is uncovered. (c) Add tests for those, targeting a high bar (≥80% line coverage on the `service/`, `service/notification/`, and `service/tools/` packages). (d) Treat any uncovered branch as either a tested edge case or a documented decision in AGENTS.md — no silent "we didn't bother".
+8. ~~Add `@ControllerAdvice` for RFC 7807 problem-details error responses.~~ ✅ Done. `controller/GlobalExceptionHandler` (`@RestControllerAdvice` + `ProblemDetail`): `NoSuchElementException` → 404 "Recurso no encontrado"; `IllegalArgumentException` → 400; `MethodArgumentNotValidException` → 400 con `properties.errors` (lista `campo: mensaje`); `HttpMessageNotReadableException` → 400; excepciones genéricas → 500 logueadas. Tests: 5 en `GlobalExceptionHandlerTest` + cobertura vía `ReminderControllerTest`.
+9. ~~Add `@Valid` on every controller request body and parameter validation on `@Tool` methods.~~ ✅ Done. `@Valid` en `POST`/`PUT` de `ReminderController`; `CreateReminderDTO` exige `name` y `nextDate` (`@NotNull @Future`), `UpdateReminderDTO` igual; `RecurrentConfigDTO` valida `recurrenceInterval >= 1` y `occurrences >= 1` con `@Min` (null-safe). `ReminderAITool.createReminder` ahora valida de forma determinista (name en blanco, `creationDate` o `remindDate` null → `IllegalArgumentException` con mensaje en español que el LLM recibe como feedback) — la validación de recurrencia sigue en `ReminderService.validateRecurrence`.
+10. ~~Replace `System.out.println` with SLF4J (`@Slf4j`).~~ ✅ Done. `TelegramBotHandler` (`@Slf4j`, `log.info`/`log.error`, sin `printStackTrace`) y `ReminderAITool` (println eliminados). `grep -r "System.out" src/` no da resultados.
+11. ~~Add tests. Project has 0% business-logic coverage.~~ ✅ Done — see TODO #14 for the coverage numbers. New since TODO #4: `ReminderMapperTest` (5), `ReminderControllerTest` (13), `GlobalExceptionHandlerTest` (5), `AIServiceTest` (2), `TelegramBotHandlerTest` (5), `ReminderServiceTest` grew from 9 to 22 (CRUD completo + `advanceAfterFire` + occurrences), `ReminderAIToolTest` grew from 5 to 9 (validación determinista + `getAllReminders` + `getCurrentDate`).
+12. ~~Add OpenAPI/springdoc when the REST surface stabilizes.~~ ✅ Done. `org.springdoc:springdoc-openapi-starter-webmvc-ui:3.1.0` (serie 3.x, compatible con Spring Boot 4). Swagger UI en `/swagger-ui.html`, spec en `/v3/api-docs`.
+13. ~~Make `RecurrentConfig.occurrences` cap the total number of fires of a recurring reminder.~~ ✅ Done. Semántica elegida: **`occurrences = N` significa que el recordatorio se dispara exactamente N veces en total; la última ocurrencia borra el recordatorio.** En `ReminderService.advanceAfterFire(id)`: si `occurrences != null` y `remaining <= 1` → `repository.delete(r)` (sin consultar a `NextDateCalculator`); si `remaining > 1` → decrementa y sigue el flujo normal (calcular `nextDate`). `occurrences == null` conserva el comportamiento infinito. La validación `occurrences >= 1` ya estaba en `create`/`update` vía `validateRecurrence`. Tests: `advanceAfterFire_lastOccurrenceDeletesReminder` (N=1 → fire + delete), `advanceAfterFire_decrementsRemainingOccurrences` (N=3 → queda 2 y se reprograma), el caso infinito ya cubierto por `advanceAfterFire_recurrentWithoutOccurrencesSchedulesNext`.
+14. ~~Configure JaCoCo and bring test coverage up.~~ ✅ Done. (a) Plugin `jacoco` + `jacocoTestReport` (HTML + XML bajo `build/reports/jacoco`) integrado en `./gradlew check` (`check.dependsOn jacocoTestReport`). (b/c) Cobertura de línea actual (objetivo ≥80% en los paquetes de negocio): `service` 85.7%, `service/notification` 100%, `service/tools` 95.7%, `controller` 100%, `mapper` 95.6%, `model` 100%, `config` 100%, `dto` 100%, `integrations/telegram` 89.7%. (d) Ramas sin cubrir documentadas: `SylphyApplication.main` (bootstrap, 33%) y `ReminderScheduler`/`TelegramNotificationDispatcher` ya tienen tests propios desde TODO #2/#15.
 15. ~~Personalizar el mensaje de notificación con IA.~~ ✅ Done con el **enfoque híbrido**: (a) al crear, el LLM redacta un `notificationMessage` base que se persiste en `Reminder.notificationMessage` (`@Column(length = 1000)`); (b) al disparar, `TelegramNotificationDispatcher` invoca `ReminderMessageComposer` (servicio, no `@Tool`) con system prompt en español y los campos de la entidad, y usa el texto que devuelve; (c) cadena de fallback en `resolveText`: composer OK → texto compuesto; composer lanza `RuntimeException` o devuelve blank → `r.getNotificationMessage()`; persistido blank → `format(r)` viejo (`Recordatorio: <name>` + descripción). Garantía: la notificación nunca se pierde, en el peor caso sale el formato genérico. Coste: 1 call LLM por cada fire real, 0 si Mistral está caído. Tests: 3 nuevos en `TelegramNotificationDispatcherTest` cubriendo las tres ramas del fallback + el caso "todo blank cae al formato viejo".
 
 ---
@@ -198,6 +203,8 @@ This is **layered architecture**, not hexagonal. Do not refactor to ports/adapte
 # Run spotbugs only
 ./gradlew spotbugsMain
 
+# Coverage report (HTML + XML under build/reports/jacoco)
+./gradlew jacocoTestReport
 
 ```
 
@@ -234,7 +241,9 @@ Spotbugs is configurated and working.
 - **Spring Boot 4.x renamed `-web` to `-webmvc`**. If a tutorial suggests `spring-boot-starter-web`, it is for Boot 3.x. Use `spring-boot-starter-webmvc`.
 - **Spring AI 2.0.0** has API differences vs 1.x. The Mistral integration works via OpenAI-compat mode; do not assume Anthropic/Gemini-native starters behave the same.
 - **The LLM provider is not pinned to a specific vendor** — `spring-ai-starter-model-openai` is being used as a transport. The project is currently pointed at Mistral; the commented-out lines in `application.properties` show it was on Gemini before. Treat LLM provider as a configuration concern, not a code concern.
-- **MapStruct is configured but unused.** The `mapstruct-processor` annotation processor is wired in `build.gradle` but no `@Mapper` interface exists in the source tree. If you write one, it should compile out of the box; if it does not, check that the annotation processor is on the `annotationProcessor` configuration.
+- **MapStruct + Lombok.** Both annotation processors share the `annotationProcessor` configuration; MapStruct 1.6 has built-in Lombok support. The generated impl uses `Reminder`'s 7-arg constructor, which is written by hand (Lombok's `@AllArgsConstructor` was replaced in TODO #6 because it null-checked `creationDate` and broke the update mapping). If a new `@Mapper` fails to compile, check that the annotation processor is on the `annotationProcessor` configuration.
+- **`ProblemDetail` serializes `properties` under a JSON key of the same name.** Clients must read `$.properties.errors`, not `$.errors`.
+- **Bean Validation messages depend on the JVM locale** (e.g. `must not be blank` vs `no debe estar vacío`). Tests must not assert on the exact message text.
 - **H2 is in-memory only.** Every restart wipes the database. Acceptable for dev, unacceptable for any persistent use.
 - **The Dockerfile is the Spring Initializr default** (`FROM ubuntu:latest` + `ENTRYPOINT ["top", "-b"]`). Do not deploy with this image. A real Dockerfile is out of scope until deployment is planned.
 - **`HELP.md` is auto-generated** by Spring Initializr and is not maintained. Ignore it.

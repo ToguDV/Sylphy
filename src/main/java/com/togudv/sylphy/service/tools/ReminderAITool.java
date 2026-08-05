@@ -1,9 +1,12 @@
 package com.togudv.sylphy.service.tools;
 
+import com.togudv.sylphy.model.Frequency;
+import com.togudv.sylphy.model.RecurrentConfig;
 import com.togudv.sylphy.model.Reminder;
 import com.togudv.sylphy.service.AITool;
 import com.togudv.sylphy.service.ReminderService;
 import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.tool.annotation.Tool;
 import org.springframework.ai.tool.annotation.ToolParam;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -11,6 +14,7 @@ import org.springframework.stereotype.Service;
 
 import java.time.LocalDateTime;
 
+@Slf4j
 @Service
 public class ReminderAITool implements AITool {
     private final ReminderService reminderService;
@@ -39,24 +43,38 @@ public class ReminderAITool implements AITool {
             @ToolParam(description = "Descripcion del recordatorio") String description,
             @ToolParam(description = "Fecha de creacion yyyy-MM-dd'T'HH:mm:ss") LocalDateTime creationDate,
             @ToolParam(description = "Fecha donde se dará el recordatorio yyyy-MM-dd'T'HH:mm:ss") LocalDateTime remindDate,
-            @ToolParam(description = "Define si el recordatorio es recurrente") Boolean isRecurrent,
             @ToolParam(description = "Mensaje personalizado en espanol, tono cercano, segunda persona, "
-                    + "que el bot enviara cuando se dispare el recordatorio") String notificationMessage)
+                    + "que el bot enviara cuando se dispare el recordatorio") String notificationMessage,
+            @ToolParam(description = "Frecuencia de recurrencia (MINUTELY, HOURLY, DAILY, WEEKLY, MONTHLY, "
+                    + "YEARLY). null si el recordatorio es de una sola vez.") Frequency frequencyType,
+            @ToolParam(description = "Cada cuantas unidades de frequencyType se repite el recordatorio. "
+                    + "Solo si frequencyType no es null; si no se indica, se usa 1.") Integer recurrenceInterval,
+            @ToolParam(description = "Numero total de veces que debe dispararse el recordatorio. "
+                    + "null significa indefinido. Solo si frequencyType no es null.") Integer occurrences)
     {
-        Reminder reminder = new Reminder(null, name, description, creationDate, remindDate, null, notificationMessage);
+        if (name == null || name.isBlank()) {
+            throw new IllegalArgumentException("El nombre del recordatorio es obligatorio");
+        }
+        if (creationDate == null) {
+            throw new IllegalArgumentException("La fecha de creacion es obligatoria");
+        }
+        if (remindDate == null) {
+            throw new IllegalArgumentException("La fecha del recordatorio es obligatoria");
+        }
+        RecurrentConfig config = frequencyType == null
+                ? null
+                : RecurrentConfig.of(frequencyType, recurrenceInterval, occurrences);
+        Reminder reminder = new Reminder(null, name, description, creationDate, remindDate, config, notificationMessage);
         reminderService.create(reminder);
-        System.out.println("Recordatorio guardado");
-        System.out.println(reminder);
-        return "El recordatorio: "+name +" "+"ha sido guardado.";
+        log.info("tool: recordatorio creado '{}'", name);
+        return "El recordatorio: " + name + " ha sido guardado.";
     }
 
     @Tool(description = "Obtiene toda la lista de recordatorios")
     public String getAllReminders()
     {
-        System.out.println("Obteniendo todos los reminders...");
         Iterable<Reminder> reminders = reminderService.getAll();
-        System.out.println("Reminders obtenidos:");
-        System.out.println(reminders);
+        log.info("tool: consultados todos los recordatorios");
         return reminders.toString();
     }
     @Tool(description = "Obtener fecha actual, util para antes de crear un recordatorio")

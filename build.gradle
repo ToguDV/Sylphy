@@ -3,6 +3,7 @@ plugins {
     id 'org.springframework.boot' version '4.1.0'
     id 'io.spring.dependency-management' version '1.1.7'
     id "com.github.spotbugs" version "6.5.9"
+    id 'jacoco'
 }
 
 group = 'com.togudv'
@@ -32,6 +33,7 @@ dependencies {
     implementation("org.telegram:telegrambots-client:10.0.0")
     implementation 'org.springframework.boot:spring-boot-starter-validation'
     implementation 'org.mapstruct:mapstruct:1.6.3'
+    implementation 'org.springdoc:springdoc-openapi-starter-webmvc-ui:3.1.0'
     compileOnly 'com.github.spotbugs:spotbugs-annotations:4.10.3'
     compileOnly 'org.projectlombok:lombok'
     developmentOnly 'org.springframework.boot:spring-boot-devtools'
@@ -55,3 +57,13 @@ dependencyManagement {
 tasks.named('test') {
     useJUnitPlatform()
 }
+
+jacocoTestReport {
+    dependsOn test
+    reports {
+        html.required = true
+        xml.required = true
+    }
+}
+
+check.dependsOn jacocoTestReport

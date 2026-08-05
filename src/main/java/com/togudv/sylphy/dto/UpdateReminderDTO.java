@@ -6,7 +6,7 @@ import jakarta.validation.constraints.NotNull;
 
 import java.time.LocalDateTime;
 
-public record CreateReminderDTO(
+public record UpdateReminderDTO(
         @NotBlank
         String name,
         String description,

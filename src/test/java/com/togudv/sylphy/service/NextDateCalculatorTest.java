@@ -58,6 +58,26 @@ class NextDateCalculatorTest {
     }
 
     @Test
+    void monthly_day31_clampsToLastDayOfShorterMonth() {
+        Reminder r = build(LocalDateTime.of(2026, 1, 31, 10, 0), Frequency.MONTHLY, 1);
+        assertEquals(LocalDateTime.of(2026, 2, 28, 10, 0), calculator.next(r));
+    }
+
+    @Test
+    void monthly_day31_recoversFullMonthAfterClamp() {
+        Reminder r = buildWithDay(LocalDateTime.of(2026, 2, 28, 10, 0), Frequency.MONTHLY, 1, 31);
+        assertEquals(LocalDateTime.of(2026, 3, 31, 10, 0), calculator.next(r));
+    }
+
+    @Test
+    void monthly_day30_clampsInFebruaryAndRecovers() {
+        Reminder r = buildWithDay(LocalDateTime.of(2026, 1, 30, 10, 0), Frequency.MONTHLY, 1, 30);
+        assertEquals(LocalDateTime.of(2026, 2, 28, 10, 0), calculator.next(r));
+        Reminder next = buildWithDay(LocalDateTime.of(2026, 2, 28, 10, 0), Frequency.MONTHLY, 1, 30);
+        assertEquals(LocalDateTime.of(2026, 3, 30, 10, 0), calculator.next(next));
+    }
+
+    @Test
     void yearly_leapDay_normalisesToFeb28() {
         Reminder r = build(LocalDateTime.of(2024, 2, 29, 10, 0), Frequency.YEARLY, 1);
         assertEquals(LocalDateTime.of(2025, 2, 28, 10, 0), calculator.next(r));
@@ -82,11 +102,17 @@ class NextDateCalculatorTest {
     }
 
     private static Reminder build(LocalDateTime nextDate, Frequency frequency, Integer interval) {
+        return buildWithDay(nextDate, frequency, interval, null);
+    }
+
+    private static Reminder buildWithDay(LocalDateTime nextDate, Frequency frequency, Integer interval,
+                                         Integer dayOfMonth) {
         RecurrentConfig cfg = null;
         if (frequency != null || interval != null) {
             cfg = new RecurrentConfig();
             cfg.setFrequencyType(frequency);
             cfg.setRecurrenceInterval(interval);
+            cfg.setDayOfMonth(dayOfMonth);
         }
         return new Reminder(null, "test", null, nextDate, nextDate, cfg, null);
     }

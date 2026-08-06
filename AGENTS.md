@@ -35,16 +35,20 @@ The long-term assistant should be able to:
 - **Context before automation:** do not add autonomous device actions, invasive monitoring, or aggressive nudging before the underlying intent, consent, and audit trail are clear.
 - **Channel independence:** Telegram and future channel adapters handle transport and presentation; scheduling, memory, task state, follow-up policy, and assistant reasoning belong in shared application services. Channels are separate interfaces, not separate assistants or data silos.
 
+---
+
 ## Scope Roadmap
 
 The roadmap is directional. It explains what future work should converge toward; it does not authorize implementing every capability now.
 
-### Phase 1: Reliable reminder and task foundation
+### Phase 1: Reliable reminder and task foundation — ✅ MVP COMPLETE
 
 - Create, inspect, update, postpone, complete, and cancel tasks and reminders through natural language.
 - Deliver one-shot and recurring notifications reliably, with explicit occurrence and failure semantics.
 - Establish the REST contract in parallel with the Telegram tools.
 - Keep the domain free of Telegram-specific fields so the first single-chat setup can evolve later.
+
+Phase 1 is done end-to-end: domain model, REST CRUD, AI tools, scheduler, Telegram delivery, error contract, and test coverage. The **MVP Completion Record** below documents every decision made while building it.
 
 ### Phase 2: Active-work tracking
 
@@ -82,6 +86,7 @@ Do not implement Phase 2-4 as speculative abstractions during Phase 1. Instead, 
 | Validation | `spring-boot-starter-validation` | Jakarta Bean Validation. |
 | Boilerplate | Lombok | Partial usage — see Conventions. |
 | Mapping | MapStruct 1.6.3 | `mapper/ReminderMapper` — DTO ↔ entity (`componentModel = "spring"`). |
+| Static analysis | Spotbugs 6.5.9 + `spotbugs-annotations` | Wired into `./gradlew build` (main + test). |
 | API docs | springdoc-openapi 3.1.0 | Swagger UI at `/swagger-ui.html`, spec at `/v3/api-docs`. |
 | Test | JUnit 5 (Jupiter) | `useJUnitPlatform()` in `build.gradle:54`. JaCoCo wired into `./gradlew check`. |
 
@@ -89,20 +94,22 @@ Do not implement Phase 2-4 as speculative abstractions during Phase 1. Instead, 
 
 ## Target Architecture
 
-### Layered structure (existing + planned)
+### Layered structure (current)
 
 ```
 com.togudv.sylphy
-├── controller/         # REST endpoints for future clients and automation
-├── service/            # Business logic
-│   └── tools/          # Spring AI @Tool implementations exposed to the LLM
-├── repository/         # Spring Data JPA
-├── mapper/             # MapStruct DTO ↔ entity mappers
-├── dto/                # API contract types (Java records)
-├── model/              # JPA entities + @Embeddable value objects
-├── integrations/
-│   └── telegram/       # Telegram transport and presentation adapter
-└── SylphyApplication   # Entry point
+├── SylphyApplication       # Entry point (@EnableScheduling)
+├── config/                 # NotificationDestination provider (chat-id resolution)
+├── controller/             # REST endpoints + GlobalExceptionHandler (RFC 7807)
+├── service/                # Business logic
+│   ├── notification/       # NotificationDispatcher SPI + Telegram impl + delivery errors
+│   └── tools/              # Spring AI @Tool implementations exposed to the LLM
+├── repository/             # Spring Data JPA
+├── mapper/                 # MapStruct DTO ↔ entity mappers
+├── dto/                    # API contract types (Java records)
+├── model/                  # JPA entities + @Embeddable value objects
+└── integrations/
+    └── telegram/           # Telegram transport and presentation adapter
 ```
 
 This is **layered architecture**, not hexagonal. Do not refactor to ports/adapters without an explicit request — it is premature.
@@ -113,22 +120,41 @@ This is **layered architecture**, not hexagonal. Do not refactor to ports/adapte
 - **Telegram bot SPI** via `SpringLongPollingBot` + `LongPollingSingleThreadUpdateConsumer` in `TelegramBotHandler`.
 - **Interface-based tool registry**: implement `AITool` (`getName()`) to add new tools.
 - **JPA aggregate**: `Reminder` is the root; `RecurrentConfig` is `@Embedded` (not a separate entity).
-- **Constructor injection** is the preferred style. Field injection exists in legacy code (see Conventions).
+- **Constructor injection everywhere.** No field injection remains. `@Value` is used only for scalar config (bot token, chat id), never for bean references.
+- **Service-side boundary validation shared by all entry points.** `ReminderService.validateRecurrence` runs on create and update, so REST, the AI tool, and the scheduler all get the same semantics regardless of caller.
+- **Load-then-patch update.** `ReminderService.updateById` loads the existing entity, copies the editable fields, and saves — `creationDate` is never overwritten.
+- **Transactional fire-and-advance.** `ReminderService.advanceAfterFire` computes the next fire date (or deletes the reminder, honoring the `occurrences` cap) inside a transaction; the scheduler never mutates the aggregate directly.
 - **REST contract + RFC 7807**: `ReminderController` returns DTO records via `ReminderMapper`; errors bubble up as domain exceptions (`NoSuchElementException`, `IllegalArgumentException`) and `GlobalExceptionHandler` translates them into `ProblemDetail` (404/400) with `properties.errors` for validation failures. `@Valid` on every request body.
 - **Notification destination is config, not data.** A single `NotificationDestination` bean reads `telegram.notification.chat-id` from properties and is injected wherever a destination is needed. The `Reminder` entity carries no per-channel fields. When a second channel or a second user appears, this provider is refactored — the entity stays untouched.
+- **Delivery failure is retried, never skipped.** The scheduler only advances the reminder after every dispatcher succeeds; a failed delivery (`NotificationDeliveryException`, logged) leaves `nextDate` in the past so the next tick retries it.
+- **Notification text has a guaranteed fallback chain.** Composer output → persisted `notificationMessage` → generic `format(Reminder)`; a notification is always sent even when the LLM is down.
 
-### Notification destination (target)
+### Runtime flows
 
-- Lives in `application.properties` as `telegram.notification.chat-id`, resolved from the `TELEGRAM_NOTIFICATION_CHAT_ID` env var (with empty default — fail loudly at startup if missing, do not silently fall back).
-- Exposed to the rest of the app via a `NotificationDestination` `@Component` (constructor-injected via `@Value`).
+**Creation (two entry points, one service):**
+
+- Telegram: message → `AIService.generate` (LLM + tools) → `ReminderAITool.createReminder` → `ReminderService.create`.
+- REST: `POST /api/reminders` (`@Valid`) → `ReminderMapper.toEntity` (server-assigned `creationDate`) → `ReminderService.create`.
+- The LLM also drafts a base `notificationMessage` at creation time (hybrid approach — see MVP Completion Record).
+
+**Fire (scheduler loop):**
+
+- `ReminderScheduler.tick` (`@Scheduled`, `sylphy.scheduler.tick-millis`, default 60000) → `ReminderRepository.findByNextDateLessThanEqual(now)` → for each due reminder: dispatch to **every** `NotificationDispatcher` accumulating errors (a failure in one dispatcher does not skip the others) → only if all delivered, `advanceAfterFire` (compute next via `NextDateCalculator` or delete; `occurrences` decremented). Scheduler failure semantics: delivery error → reminder stays due and is retried next tick (documented limitation: with several dispatchers a partially-failed delivery is re-delivered to all; idempotency requires per-dispatcher delivery state — deferred while only one dispatcher exists); invalid recurrence config (`IllegalArgumentException` from `advanceAfterFire`) → the broken reminder is **deleted** so it cannot re-fire every tick; entity vanished mid-tick → warn and continue.
+- `TelegramNotificationDispatcher` resolves text via `ReminderMessageComposer` (fallback chain above) and sends a real `SendMessage` through the `TelegramClient` bean.
+
+### Notification destination (current)
+
+- Lives in `application.properties` as `telegram.notification.chat-id`, resolved from the `TELEGRAM_NOTIFICATION_CHAT_ID` env var (with empty default — fails fast at startup if missing, no silent fallback).
+- Exposed to the rest of the app via the `NotificationDestination` `@Component` (constructor-injected via `@Value`); `TelegramNotificationDestination` is the sole implementation, `final`, and throws `IllegalStateException` when unset.
 - The dispatcher depends on `NotificationDestination`, not on a per-reminder field.
 - Rationale: one bot = one chat today. Storing `chatId` per `Reminder` would be redundant data that has to be backfilled and migrated when the web UI or a second user lands. Keep the domain clean; push channel-specific state to config until the model actually needs it.
 
-### Domain model (target)
+### Domain model (current)
 
-- `Reminder`: `id`, `name`, `description`, `creationDate`, `nextDate`, `recurrentConfig`. **No `chatId`, no `userId`** — those are channel/identity concerns, not reminder concerns.
-- `RecurrentConfig` (`@Embeddable`): `frequencyType: Frequency`, `recurrenceInterval: Integer`, `occurrences: Integer`. (`Set<Frequency>` / `daysOfWeek` / `daysOfMonth` were removed during TODO #2 — the chosen `anchor + N units` algorithm does not need them. See TODO #13 for `occurrences` semantics.)
+- `Reminder`: `id`, `name`, `description`, `creationDate`, `nextDate`, `recurrentConfig`, `notificationMessage` (`@Column(length = 1000)`). **No `chatId`, no `userId`** — those are channel/identity concerns, not reminder concerns.
+- `RecurrentConfig` (`@Embeddable`): `frequencyType: Frequency`, `recurrenceInterval: Integer`, `occurrences: Integer`, `dayOfMonth: Integer` (nullable, internal). **`occurrences = N` means the reminder fires exactly N times in total; the last fire deletes the reminder.** `occurrences == null` means infinite. `dayOfMonth` is assigned by `ReminderService` at create/update from `nextDate` for MONTHLY/YEARLY reminders: it is the day the user picked, so a monthly reminder on the 31st keeps firing on the 31st (31 ene → 28 feb → 31 mar) instead of drifting to the 28th. (`Set<Frequency>` / `daysOfWeek` / `daysOfMonth` were removed during the MVP — the chosen `anchor + N units` algorithm does not need them; see MVP Completion Record.)
 - `Frequency` enum: `MINUTELY, HOURLY, DAILY, WEEKLY, MONTHLY, YEARLY` — `public`, lives in its own file `model/Frequency.java`.
+- `NextDateCalculator.next(Reminder)` is a pure function: anchor = current `nextDate`, plus N units; MONTHLY/YEARLY clamp the day to the last day of the target month when it is shorter than the recorded `dayOfMonth` (falls back to the anchor's day when `dayOfMonth` is null, e.g. pre-existing rows); throws `IllegalArgumentException` on missing `frequencyType` or invalid interval; returns `null` to signal "one-shot → delete".
 
 ### Capability boundaries (target)
 
@@ -141,54 +167,110 @@ This is **layered architecture**, not hexagonal. Do not refactor to ports/adapte
 
 ---
 
-## Current State
+## Current State — Phase 1 MVP complete
 
-### ✅ Works (verified by code inspection)
+The original 16-item MVP TODO list is **done**. `./gradlew build` (compile + tests + spotbugs main+test + JaCoCo) is green, and the coverage target (≥80% line coverage in business packages) is met. The **MVP Completion Record** below is the permanent record of what was built and why.
 
-- `./gradlew build` succeeds: compile + tests + spotbugs (main+test) + JaCoCo all green.
-- Gradle build configuration is consistent; wrapper resolves.
-- `Reminder` + `RecurrentConfig` + `Frequency` form a coherent aggregate.
-- `ReminderRepository extends CrudRepository<Reminder, Long>` is valid.
-- `ReminderService` full CRUD (`getAll`, `getById`, `create`, `updateById` — loads existing, applies the patch, saves, throws `NoSuchElementException` when missing —, `deleteById`) plus `advanceAfterFire` with the `occurrences` cap (last fire deletes the reminder).
-- `ReminderAITool.createReminder` constructs `Reminder` with the matching 7-arg ctor (`id=null`), builds `RecurrentConfig.of(...)` only when `frequencyType != null`, and validates `name`/`creationDate`/`remindDate` deterministically.
-- `mapper/ReminderMapper` (MapStruct) maps DTO ↔ entity; `creationDate` is server-assigned on create and ignored on update.
-- REST contract at `/api/reminders` with `@Valid` bodies and RFC 7807 `ProblemDetail` errors via `GlobalExceptionHandler`.
-- OpenAPI docs: Swagger UI at `/swagger-ui.html`, spec at `/v3/api-docs`.
-- Telegram bot message loop is wired: text → `AIService.generate` → reply; all logging via SLF4J (`@Slf4j`), no `System.out`.
-- `AIService` builds a `ChatClient` with tools correctly.
-- `application.properties` is syntactically valid; Mistral config is active.
-- **Secrets are externalized.** `telegram.bot.token` and `spring.ai.openai.api-key` resolve from env vars (`TELEGRAM_BOT_TOKEN`, `SPRING_AI_OPENAI_API_KEY`) with empty defaults — nothing sensitive is hardcoded. A `.env` file at the project root is picked up via `spring.config.import=optional:file:.env[.properties]`. `TelegramBotHandler` injects the token with `@Value("${telegram.bot.token:}")` (constructor-injected).
+### Verified working
 
-### ❌ Still broken — fix before any feature work
+- Full CRUD at `/api/reminders` (GET list, GET by id, POST 201, PUT full replace preserving `creationDate`, DELETE 204) with `@Valid` bodies, `ReminderMapper` (MapStruct), and RFC 7807 `ProblemDetail` errors.
+- AI tools: `createReminder` (recurrence via `Frequency` / `recurrenceInterval` / `occurrences`), `getAllReminders`, `getCurrentDate` — deterministic validation in the tool, boundary validation in the service.
+- Scheduler loop end-to-end: tick → due query → dispatch → advance/delete; recurring math in `NextDateCalculator`; `occurrences` cap honored.
+- Telegram: message loop (text → `AIService.generate` → reply) plus outbound push via `TelegramClient` with the composer fallback chain.
+- OpenAPI docs at `/swagger-ui.html` and `/v3/api-docs`.
+- Secrets fully externalized; `.env` auto-imported for local dev; no `System.out` anywhere (`grep -r "System.out" src/` is clean).
 
-- `ReminderController` `@GetMapping("/ ")` dead endpoint and the `System.out.println` / `e.printStackTrace()` logging in `TelegramBotHandler` are **fixed** (see TODO #5 and #10 below).
-- **Historical secret leak (informational, not a code fix).** The initial commit (`0ee3e35`) hardcoded real Telegram bot and Mistral API keys. The keys were rotated; do not reintroduce secrets into source or configuration committed to git.
+### Historical note (informational, not a code fix)
 
-### 📋 Missing (priority-ordered TODO for MVP)
+The initial commit (`0ee3e35`) hardcoded real Telegram bot and Mistral API keys. The keys were rotated. **Do not reintroduce secrets into source or committed configuration.** Secrets live in env vars: `TELEGRAM_BOT_TOKEN`, `TELEGRAM_NOTIFICATION_CHAT_ID`, `SPRING_AI_OPENAI_API_KEY`.
 
-0. ~~Arreglar problemas encontrados con spotbugs~~ ✅ Done. CT closed by making `TelegramNotificationDestination` `final`; EI/EI2 on `CreateReminderDTO` closed by introducing `RecurrentConfigDTO` (JPA @Embeddable no longer leaks into the API contract); EI2 on `ReminderAITool` closed via `@SuppressFBWarnings` with justification. `./gradlew spotbugsMain` and `spotbugsTest` are green.
-1. ~~Wire `NotificationDestination` provider (constructor-injected, reads `telegram.notification.chat-id`) and inject it into the dispatcher. The entity stays free of per-channel fields.~~ ✅ Provider done (`config/NotificationDestination` + `TelegramNotificationDestination`, constructor-injected, fails fast on missing `chat-id`). The "inject into dispatcher" half lands with TODO #3.
-2. ~~Implement scheduler: `@EnableScheduling` + logic to read `RecurrentConfig`, compute next fire time, update `nextDate`, and trigger notification.~~ ✅ Done end-to-end. `service/NextDateCalculator` (pure function `next(Reminder)`, anchor + N units, throws on missing `frequencyType` or invalid `interval`, returns `null` to signal "one-shot → delete"); `service/ReminderScheduler` (`@Scheduled(fixedDelayString="${sylphy.scheduler.tick-millis:60000}")`); `service/notification/NotificationDispatcher` interface + `TelegramNotificationDispatcher` (real `SendMessage` via `TelegramClient.execute`, errors wrapped in `NotificationDeliveryException`); `integrations/telegram/TelegramConfig` provides the `TelegramClient` bean and `TelegramBotHandler` was refactored to inject it; `ReminderService.advanceAfterFire(id)` does the "compute next or delete" step inside a transaction; `ReminderRepository.findByNextDateLessThanEqual(now)` derived query; `SylphyApplication` enables scheduling and dropped three dead imports; `application.properties` adds `sylphy.scheduler.tick-millis=60000`. Test coverage: 5 in `ReminderSchedulerTest`, 11 in `NextDateCalculatorTest`, 3 in `TelegramNotificationDispatcherTest`. `./gradlew build` (compile + test + spotbugs main+test) green. Side-effect refactors: `RecurrentConfig.frequencyType` (and the DTO field) changed from `Set<Frequency>` to `Frequency` (the set was incoherent with the calculator's strict semantics); `daysOfWeek` / `daysOfMonth` removed from `RecurrentConfig` and the DTO (the chosen `anchor + N units` algorithm does not consume them — keeping them would have been a dead-field smell; if multi-day semantics are needed later, that is a separate design + a new `NextDateCalculator` algorithm).
-3. Implement notification dispatcher (Telegram client push from a scheduled task). Will consume `NotificationDestination` (TODO #1) at that point. ✅ Done as a side-effect of TODO #2: `TelegramNotificationDispatcher` does the real `SendMessage` push and reads `NotificationDestination` for the chat id.
-4. ~~Wire `createReminder` AI tool to populate `RecurrentConfig` correctly (the `isRecurrent` boolean is currently dropped; the `RecurrentConfig` argument is passed as `null`).~~ ✅ Done. `ReminderAITool.createReminder` now takes `Frequency frequencyType`, `Integer recurrenceInterval`, `Integer occurrences` (ToolParams en español); construye `RecurrentConfig.of(...)` solo cuando `frequencyType != null` (config `null` = recordatorio de una sola vez) y lo pasa al ctor de 7-arg. La validación de frontera (freq obligatoria si hay config, `recurrenceInterval` default `1` y `>= 1`, `occurrences` si está definido `>= 1`) vive en `ReminderService.create` vía `validateRecurrence` (reutilizable por el REST #5 y por #13), no en el tool. `RecurrentConfig` ganó un `static of(...)` de conveniencia (Lombok `@Data` no generaba ctor con args). Tests: 5 en `ReminderAIToolTest`, 9 en `ReminderServiceTest`. `./gradlew build` verde.
-5. ~~Implement real CRUD endpoints in `ReminderController` (GET list, GET by id, POST, PUT, DELETE).~~ ✅ Done. `ReminderController` now exposes `GET /api/reminders` (list), `GET /api/reminders/{id}`, `POST /api/reminders` (201, `creationDate` es asignado por el mapper al servidor, nunca viene del cliente), `PUT /api/reminders/{id}` (reemplazo completo de `name`, `description`, `nextDate`, `recurrentConfig`, `notificationMessage`; `creationDate` se conserva) y `DELETE /api/reminders/{id}` (204). El endpoint muerto `@GetMapping("/ ")` fue eliminado. `ReminderService` ganó `getById(id)` (lanza `NoSuchElementException`) y `updateById` ahora valida recurrencia y copia `notificationMessage`. Tests: 13 en `ReminderControllerTest` (MockMvc standalone + advice).
-6. ~~Add a DTO ↔ entity mapper. MapStruct is already on the classpath — write the `@Mapper` interface.~~ ✅ Done. `mapper/ReminderMapper` (`@Mapper(componentModel = "spring")`): `toEntity(CreateReminderDTO)` (ignora `id`, setea `creationDate = now`), `toEntity(UpdateReminderDTO)` (ignora `id` y `creationDate`), `toDto(Reminder)`, `toRecurrentConfigDto(RecurrentConfig)`. El impl generado usa el ctor de 7-arg de `Reminder`, que ahora es manual (no Lombok) y acepta `creationDate` nullable solo para el path de update (justificado con `@SuppressFBWarnings` EI2/NP). Tests: 5 en `ReminderMapperTest`.
-7. ~~Stop leaking the JPA `RecurrentConfig` through `CreateReminderDTO`; create a parallel `RecurrentConfigDTO`.~~ ✅ Done. `dto/RecurrentConfigDTO` is a record; `CreateReminderDTO.recurrentConfig` is now typed as the DTO. (The compact-constructor `Set.copyOf` was dropped together with the `daysOfWeek` / `daysOfMonth` removal in TODO #2.)
-8. ~~Add `@ControllerAdvice` for RFC 7807 problem-details error responses.~~ ✅ Done. `controller/GlobalExceptionHandler` (`@RestControllerAdvice` + `ProblemDetail`): `NoSuchElementException` → 404 "Recurso no encontrado"; `IllegalArgumentException` → 400; `MethodArgumentNotValidException` → 400 con `properties.errors` (lista `campo: mensaje`); `HttpMessageNotReadableException` → 400; excepciones genéricas → 500 logueadas. Tests: 5 en `GlobalExceptionHandlerTest` + cobertura vía `ReminderControllerTest`.
-9. ~~Add `@Valid` on every controller request body and parameter validation on `@Tool` methods.~~ ✅ Done. `@Valid` en `POST`/`PUT` de `ReminderController`; `CreateReminderDTO` exige `name` y `nextDate` (`@NotNull @Future`), `UpdateReminderDTO` igual; `RecurrentConfigDTO` valida `recurrenceInterval >= 1` y `occurrences >= 1` con `@Min` (null-safe). `ReminderAITool.createReminder` ahora valida de forma determinista (name en blanco, `creationDate` o `remindDate` null → `IllegalArgumentException` con mensaje en español que el LLM recibe como feedback) — la validación de recurrencia sigue en `ReminderService.validateRecurrence`.
-10. ~~Replace `System.out.println` with SLF4J (`@Slf4j`).~~ ✅ Done. `TelegramBotHandler` (`@Slf4j`, `log.info`/`log.error`, sin `printStackTrace`) y `ReminderAITool` (println eliminados). `grep -r "System.out" src/` no da resultados.
-11. ~~Add tests. Project has 0% business-logic coverage.~~ ✅ Done — see TODO #14 for the coverage numbers. New since TODO #4: `ReminderMapperTest` (5), `ReminderControllerTest` (13), `GlobalExceptionHandlerTest` (5), `AIServiceTest` (2), `TelegramBotHandlerTest` (5), `ReminderServiceTest` grew from 9 to 22 (CRUD completo + `advanceAfterFire` + occurrences), `ReminderAIToolTest` grew from 5 to 9 (validación determinista + `getAllReminders` + `getCurrentDate`).
-12. ~~Add OpenAPI/springdoc when the REST surface stabilizes.~~ ✅ Done. `org.springdoc:springdoc-openapi-starter-webmvc-ui:3.1.0` (serie 3.x, compatible con Spring Boot 4). Swagger UI en `/swagger-ui.html`, spec en `/v3/api-docs`.
-13. ~~Make `RecurrentConfig.occurrences` cap the total number of fires of a recurring reminder.~~ ✅ Done. Semántica elegida: **`occurrences = N` significa que el recordatorio se dispara exactamente N veces en total; la última ocurrencia borra el recordatorio.** En `ReminderService.advanceAfterFire(id)`: si `occurrences != null` y `remaining <= 1` → `repository.delete(r)` (sin consultar a `NextDateCalculator`); si `remaining > 1` → decrementa y sigue el flujo normal (calcular `nextDate`). `occurrences == null` conserva el comportamiento infinito. La validación `occurrences >= 1` ya estaba en `create`/`update` vía `validateRecurrence`. Tests: `advanceAfterFire_lastOccurrenceDeletesReminder` (N=1 → fire + delete), `advanceAfterFire_decrementsRemainingOccurrences` (N=3 → queda 2 y se reprograma), el caso infinito ya cubierto por `advanceAfterFire_recurrentWithoutOccurrencesSchedulesNext`.
-14. ~~Configure JaCoCo and bring test coverage up.~~ ✅ Done. (a) Plugin `jacoco` + `jacocoTestReport` (HTML + XML bajo `build/reports/jacoco`) integrado en `./gradlew check` (`check.dependsOn jacocoTestReport`). (b/c) Cobertura de línea actual (objetivo ≥80% en los paquetes de negocio): `service` 85.7%, `service/notification` 100%, `service/tools` 95.7%, `controller` 100%, `mapper` 95.6%, `model` 100%, `config` 100%, `dto` 100%, `integrations/telegram` 89.7%. (d) Ramas sin cubrir documentadas: `SylphyApplication.main` (bootstrap, 33%) y `ReminderScheduler`/`TelegramNotificationDispatcher` ya tienen tests propios desde TODO #2/#15.
-15. ~~Personalizar el mensaje de notificación con IA.~~ ✅ Done con el **enfoque híbrido**: (a) al crear, el LLM redacta un `notificationMessage` base que se persiste en `Reminder.notificationMessage` (`@Column(length = 1000)`); (b) al disparar, `TelegramNotificationDispatcher` invoca `ReminderMessageComposer` (servicio, no `@Tool`) con system prompt en español y los campos de la entidad, y usa el texto que devuelve; (c) cadena de fallback en `resolveText`: composer OK → texto compuesto; composer lanza `RuntimeException` o devuelve blank → `r.getNotificationMessage()`; persistido blank → `format(r)` viejo (`Recordatorio: <name>` + descripción). Garantía: la notificación nunca se pierde, en el peor caso sale el formato genérico. Coste: 1 call LLM por cada fire real, 0 si Mistral está caído. Tests: 3 nuevos en `TelegramNotificationDispatcherTest` cubriendo las tres ramas del fallback + el caso "todo blank cae al formato viejo".
+---
+
+## MVP Completion Record (decision log)
+
+The original priority-ordered TODO list, reorganized by theme. These are **decisions**, not just "things done": future changes must respect the semantics they establish or deliberately reverse them.
+
+### Build & static analysis
+
+- **Spotbugs green (was TODO #0).** `CT` closed by making `TelegramNotificationDestination` `final`; `EI/EI2` on `CreateReminderDTO` closed by introducing `RecurrentConfigDTO` (the JPA `@Embeddable` no longer leaks into the API contract); `EI2` on `ReminderAITool`, `ReminderController`, and `Reminder` closed via `@SuppressFBWarnings` with written justifications. Convention: suppressions are acceptable for Spring-managed singletons and for the aggregate root mutating its own `@Embedded` value — always with a justification.
+- **SLF4J everywhere (was TODO #10).** `System.out.println` / `e.printStackTrace()` replaced with `@Slf4j` in `TelegramBotHandler` and `ReminderAITool`.
+- **JaCoCo wired into `./gradlew check` (was TODO #14).** Plugin + report (HTML/XML under `build/reports/jacoco`). Line coverage at completion: `service` 85.7%, `service/notification` 100%, `service/tools` 95.7%, `controller` 100%, `mapper` 95.6%, `model` 100%, `config` 100%, `dto` 100%, `integrations/telegram` 89.7%. Uncovered branches are accepted only where documented (e.g. `SylphyApplication.main` bootstrap).
+
+### Domain & API contract
+
+- **`RecurrentConfigDTO` introduced (was TODO #7).** The API never exposes the JPA `@Embeddable`; DTOs are plain records.
+- **MapStruct mapper (was TODO #6).** `mapper/ReminderMapper` (`componentModel = "spring"`): `toEntity(CreateReminderDTO)` ignores `id` and sets `creationDate = now` (server-assigned, never client-supplied); `toEntity(UpdateReminderDTO)` ignores `id` and `creationDate`; `toDto(Reminder)` / `toRecurrentConfigDto(RecurrentConfig)` round-trip.
+- **Manual 7-arg `Reminder` constructor.** Replaced Lombok `@AllArgsConstructor`, which null-checked `creationDate` and broke the update mapping (the update path passes `creationDate = null`; `ReminderService.updateById` never persists it, it copies only editable fields onto the existing entity). `@Nullable` + `@SuppressFBWarnings(NP)` with justification.
+- **`Frequency` promoted to a public top-level enum** (`MINUTELY, HOURLY, DAILY, WEEKLY, MONTHLY, YEARLY`) so DTO, entity, and tool can share it.
+- **Recurrence model simplified (side-effect of TODO #2).** `frequencyType` changed from `Set<Frequency>` to a single `Frequency`; `daysOfWeek` / `daysOfMonth` were removed. The chosen `anchor + N units` algorithm cannot consume them — keeping them would have been a dead-field smell. If multi-day semantics are needed later, that is a separate design plus a new `NextDateCalculator` algorithm, not a field re-add. **Post-MVP addendum (REVISION.md #16):** a `dayOfMonth: Integer` field was added back with a different purpose — preserving the user's chosen day across short months for MONTHLY/YEARLY reminders (31 ene → 28 feb → 31 mar, decided semantics: clamp to the last day of the target month). It is assigned by `ReminderService` at create/update, never exposed in the API contract, and `null` falls back to the anchor's day (pre-existing rows).
+
+### Validation & error handling
+
+- **`GlobalExceptionHandler` (was TODO #8).** `@RestControllerAdvice` producing RFC 7807 `ProblemDetail`: `NoSuchElementException` → 404 "Recurso no encontrado"; `IllegalArgumentException` → 400; `MethodArgumentNotValidException` → 400 with `properties.errors` (`campo: mensaje`); `HttpMessageNotReadableException` → 400; generic exceptions → 500, logged.
+- **`@Valid` + tool parameter validation (was TODO #9).** `@Valid` on every controller request body; `CreateReminderDTO` / `UpdateReminderDTO` require `name` (`@NotBlank`) and `nextDate` (`@NotNull @Future`); `RecurrentConfigDTO` enforces `recurrenceInterval >= 1` and `occurrences >= 1` (`@Min`, null-safe). `ReminderAITool.createReminder` validates deterministically in the tool (blank name, null `remindDate` → `IllegalArgumentException` with a Spanish message the LLM receives as feedback; the `creationDate` is always server-assigned, the LLM has no parameter for it).
+- **Boundary validation centralized in the service.** `ReminderService.validateRecurrence` (frequency required if config present; interval defaults to 1 and must be ≥ 1; occurrences ≥ 1) runs on both create and update, shared by the REST and AI-tool paths — the tool does not re-implement it.
+
+### REST surface
+
+- **Full CRUD (was TODO #5).** `GET /api/reminders`, `GET /api/reminders/{id}`, `POST` (201), `PUT /api/reminders/{id}` (full replace of `name`, `description`, `nextDate`, `recurrentConfig`, `notificationMessage`; `creationDate` preserved), `DELETE` (204). The dead `@GetMapping("/ ")` endpoint was removed. `ReminderService` gained `getById` (throws `NoSuchElementException`).
+- **OpenAPI/springdoc (was TODO #12).** `org.springdoc:springdoc-openapi-starter-webmvc-ui:3.1.0` (3.x series, compatible with Spring Boot 4). Swagger UI at `/swagger-ui.html`, spec at `/v3/api-docs`.
+
+### Scheduling & delivery
+
+- **`NotificationDestination` provider (was TODO #1).** `config/NotificationDestination` interface + `TelegramNotificationDestination` implementation, constructor-injected via `@Value`, fails fast at startup when `telegram.notification.chat-id` is missing. The entity stays free of per-channel fields.
+- **Scheduler + recurrence math (was TODO #2).** `@EnableScheduling`; `ReminderScheduler.tick` with `@Scheduled(fixedDelayString = "${sylphy.scheduler.tick-millis:60000}")`; `NextDateCalculator` (pure function, anchor = current `nextDate`, `null` result → one-shot delete); `ReminderRepository.findByNextDateLessThanEqual(now)` derived query; `advanceAfterFire` performs the compute-next-or-delete step inside a transaction; `TelegramConfig` provides the `TelegramClient` bean (bot handler refactored to inject it). Scheduler failure semantics: delivery error → reminder stays due and is retried next tick (all dispatchers are attempted, errors accumulated; advance only when all delivered); invalid recurrence config → the broken reminder is **deleted** so it cannot re-fire every tick; entity vanished mid-tick → warn and continue.
+- **Dispatcher (was TODO #3).** `NotificationDispatcher` interface + `TelegramNotificationDispatcher` (real `SendMessage` through `TelegramClient`, errors wrapped in `NotificationDeliveryException`).
+- **`occurrences` semantics (was TODO #13).** `occurrences = N` means the reminder fires exactly N times in total; the last fire deletes the reminder. In `advanceAfterFire`: `remaining <= 1` → delete without consulting the calculator; `remaining > 1` → decrement and reschedule normally; `occurrences == null` → infinite.
+- **LLM-composed notification text (was TODO #15) — hybrid approach.** (a) At creation, the LLM drafts a base `notificationMessage` persisted on the entity; (b) at fire time, `ReminderMessageComposer` (a service, not an `@Tool`; Spanish system prompt, temperature 0.7) composes fresh text from the entity fields; (c) fallback chain in `resolveText`: composer OK → composed text; composer throws or returns blank → persisted `notificationMessage`; persisted blank → generic `format(Reminder)` ("Recordatorio: <name>" + description). Guarantee: the notification is never lost; worst case is the generic format. Cost: one LLM call per real fire, zero when Mistral is down. Tests cover all three fallback branches.
+
+### AI tooling
+
+- **`createReminder` recurrence wiring (was TODO #4).** Tool parameters in Spanish: `Frequency frequencyType`, `Integer recurrenceInterval`, `Integer occurrences`; builds `RecurrentConfig.of(...)` only when `frequencyType != null` (null config = one-shot). `RecurrentConfig` gained a static `of(...)` convenience factory (Lombok `@Data` generates no all-args constructor).
+
+### Tests
+
+- **Coverage built up (was TODO #11).** Test inventory at MVP completion: `ReminderSchedulerTest` (5), `NextDateCalculatorTest` (11), `TelegramNotificationDispatcherTest` (6), `ReminderMapperTest` (5), `ReminderControllerTest` (13), `GlobalExceptionHandlerTest` (5), `AIServiceTest` (2), `TelegramBotHandlerTest` (5), `ReminderServiceTest` (22), `ReminderAIToolTest` (9), `TelegramNotificationDestinationTest`, `SylphyApplicationTests`. Do not let business-package coverage regress below the ≥80% line target.
+
+---
+
+## Chat Memory & Consolidación Episódica (decision record, post-MVP)
+
+Implemented to give the agent a persistent conversation thread whose history is shared across channels. This is the first slice of Phase 3 (episodic memory); the semantic-memory slice (provenance, correction, deletion by the user) is still pending.
+
+### Design decisions
+
+- **One shared conversation, resolved by config, not data.** `config/ConversationIdProvider` + `SingleOwnerConversationIdProvider` mirror the `NotificationDestination` pattern: every channel resolves the same `conversationId` (`sylphy.conversation.id`, default `owner-1`), so Telegram today and REST/web tomorrow read and write the **same** history. No Telegram `chatId` ever enters the domain. Multi-owner future = refactor this provider only.
+- **Spring AI 2.0.0 native integration.** `JpaChatMemory` implements the `ChatMemory` SPI and is wired via `MessageChatMemoryAdvisor` in `AIService`; `ChatMemory.CONVERSATION_ID` is passed per request. `generate(input, conversationId)` is the canonical call; the 1-arg overload delegates to the provider for compatibility.
+- **Decremental hierarchical consolidation (MemGPT-style), not a fixed window.** Raw messages (`ChatMessage`: `conversationId`, `role` USER/ASSISTANT — own enum, not Spring AI's, keeping the entity provider-free, `content` up to 4000 chars, `timestamp`) are kept only while recent; when the raw count reaches `sylphy.chat.history.window` (default 40) they are summarized into a `WINDOW` summary and deleted. Levels: `MemoryLevel WINDOW → DAILY → WEEKLY → MONTHLY → ANNUAL`. Each level folds the one below into a `MemorySummary` (`content`, `createdAt`, `periodKey`: `2026-08-05` / `2026-W32` / `2026-08` / `2026`); the fold target exists and then the lower level is deleted. Annual summaries are kept forever. `periodKey` is nullable (WINDOW summaries fold by `createdAt`).
+- **Golden rule: nothing is deleted before its summary exists.** `MemoryConsolidationService` runs the LLM call outside any transaction; `persistAndDelete` (TransactionTemplate — Spring 7 removed `ResourcelessTransactionManager`) saves the summary and deletes the folded items in one transaction. Blank/null summary → abort, keep everything, retry on next trigger. If the LLM is down, raw messages grow (window trigger retries on every subsequent `add`) and the next successful job catches up — self-healing by design, no data loss.
+- **Period-boundary folding uses parsed period keys, not `createdAt`.** Daily job folds `timestamp`/`createdAt` < today; weekly/monthly/annual fold items whose **period key** starts before the current period (a DAILY created Monday 02:00 for Sunday's data must fold into Monday's WEEKLY, not next week's). ISO week keys (`2026-W32`) are parsed via `DateTimeFormatter.ISO_WEEK_DATE`.
+- **LLM context = all existing summaries + current raw window.** `JpaChatMemory.get` returns every summary as a `SystemMessage` labelled in Spanish (`Resumen diario (2026-08-05): ...`) plus the last `windowSize` raw messages. Bounded by the hierarchy: ≤5 DAILY + ≤5 WEEKLY + ≤12 MONTHLY + N ANNUAL. WINDOW summaries are injected too but are transient (folded nightly).
+- **Known limitation (documented in Spring AI 2.0.0):** intermediate tool-call messages are not stored by the memory advisor; the user turn and the final assistant reply are. Sufficient for thread continuity; revisit only if tool-call internals are ever needed in history.
+- **Consolidation jobs** (`MemoryConsolidationScheduler`): `sylphy.chat.memory.cron.daily` (default `0 0 2 * * *`), `.weekly` (`0 0 3 * * MON`), `.monthly` (`0 0 4 1 * *`), `.annual` (`0 0 5 1 1 *`). Jobs swallow and log failures; the next run retries.
+- **Intentional latency/cost tradeoffs:** the WINDOW consolidation runs synchronously inside `ChatMemory.add`, briefly blocking the Telegram single-thread consumer (~1–2 s every 40 messages). One LLM call per consolidation trigger; zero calls when idle or when Mistral is down. The window trigger keeps raw ≤ `windowSize` (0..39) in normal operation.
+- **Notifications do not enter the conversation history** (they are outbound pushes, not part of the chat client flow). If desired later, that is a Phase 3 provenance decision, not a bug.
+
+### Coverage at implementation
+
+`service/conversation` 94% line coverage (`JpaChatMemoryTest`, `MemoryConsolidationServiceTest`, `MemorySummarizerTest`, `MemoryConsolidationSchedulerTest`); `config` 100% (`SingleOwnerConversationIdProviderTest`). Business packages all ≥80%.
+
+---
+
+## What's Next (post-MVP)
+
+Directional candidates, aligned with the roadmap. **Do not start any of these without confirming scope and approach with the user** — several involve real design decisions (state machines, new domain concepts, data migration).
+
+- **Phase 2 — active-work tracking** (most likely next): model a current focus/active task with intended duration and check-ins; add a follow-up loop (progress asks, pause/resume/postpone) and explicit state transitions; make nudging frequency and quiet hours configurable. Existing scheduler and dispatcher infrastructure is the delivery backbone; `Reminder` would need an explicit state model (planned/active/paused/postponed/completed/cancelled/missed).
+- **Persistence hardening:** H2 → PostgreSQL/MySQL + Flyway/Liquibase. Currently listed as out of scope; revisit when real deployment or persistent data is needed.
+- **Channel expansion:** second Telegram chat or REST-driven creation from a future web UI — the `NotificationDestination` provider is the designed extension point.
+- **Phase 3 — semantic memory and planning:** episodic memory (shared conversation + hierarchical consolidation) is done; the remaining slice is semantic memory with provenance, correction, and deletion semantics from day one, plus using memory for planning and wording. Only after active-work tracking stabilizes.
 
 ---
 
 ## Build & Run
 
 ```bash
-# Build everything (compile + test + jar)
+# Build everything (compile + tests + spotbugs main+test + JaCoCo report)
 ./gradlew build
 
 # Run the application
@@ -200,38 +282,37 @@ This is **layered architecture**, not hexagonal. Do not refactor to ports/adapte
 # Clean build artifacts
 ./gradlew clean
 
-# Run spotbugs only
+# Run spotbugs only (main, then test)
 ./gradlew spotbugsMain
+./gradlew spotbugsTest
 
 # Coverage report (HTML + XML under build/reports/jacoco)
 ./gradlew jacocoTestReport
-
 ```
 
 ### Required environment variables
 
 - `TELEGRAM_BOT_TOKEN` — Telegram bot token from BotFather.
-- `TELEGRAM_NOTIFICATION_CHAT_ID` — destination chat for outbound notifications (resolved by `NotificationDestination` from `telegram.notification.chat-id`). Must be set; the app should fail fast at startup if it is missing.
+- `TELEGRAM_NOTIFICATION_CHAT_ID` — destination chat for outbound notifications (resolved by `NotificationDestination` from `telegram.notification.chat-id`). Must be set; the app fails fast at startup if missing.
 - `SPRING_AI_OPENAI_API_KEY` — Mistral API key. (`spring.ai.openai.base-url` is hardcoded to `https://api.mistral.ai/v1` and `spring.ai.openai.chat.options.model` to `mistral-small-latest`; if these change, both belong in properties, not env.)
 - For local dev, a `.env` file at the project root is auto-imported (`spring.config.import=optional:file:.env[.properties]`). Use `KEY=value` lines; do **not** commit the file (it is git-ignored).
 
 ### Lint / typecheck
 
-There is no separate lint or typecheck step beyond `./gradlew build`. There is no Checkstyle, or SonarQube configuration.
-Spotbugs is configurated and working.
+There is no separate lint or typecheck step beyond `./gradlew build`; no Checkstyle or SonarQube. Spotbugs runs as part of the build (main + test) — a build with spotbugs findings is a red build.
 
 ---
 
 ## Code Conventions
 
 - **Identifiers** (class, method, field, package, parameter): **English**.
-- **User-facing strings, AI tool descriptions, comments**: **Spanish**. This matches the existing `ReminderAITool` descriptions and product intent.
+- **User-facing strings, AI tool descriptions, comments**: **Spanish**. This matches the `ReminderAITool` descriptions and product intent.
 - **Lombok**: use `@Data` on entities; consider expanding to services for getters/loggers. Do not use Lombok `@Builder` until a use case demands it.
-- **Dependency injection**: **constructor injection preferred**. Both `TelegramBotHandler` and `ReminderService` are constructor-injected (the previous field injection in `ReminderService` was removed during TODO #2; the rest of the codebase already follows this convention). `TelegramBotHandler` does take `botToken` via `@Value`; that's a value, not a bean reference, and stays in the constructor. Constructor-injected beans (e.g. `AIService`, `ReminderAITool`) are the model to follow.
+- **Dependency injection**: **constructor injection everywhere**. `@Value` only for scalar config values (bot token, chat id), never for bean references. See the injected constructors in `AIService`, `ReminderService`, `ReminderAITool`, and `TelegramNotificationDispatcher` as the model.
 - **DTOs**: Java `record`, kept separate from JPA entities. Validate with Jakarta annotations. Do not let `@Embeddable` types leak into the API contract.
-- **Validation**: `@NotBlank` on required strings, `@Future` on future-only timestamps, `@Valid` on controller request bodies.
+- **Validation**: `@NotBlank` on required strings, `@Future` on future-only timestamps, `@Valid` on controller request bodies; deterministic parameter checks in `@Tool` methods; cross-field rules centralized in the service (`validateRecurrence`).
 - **Mappers**: prefer MapStruct (already on classpath) over manual mapping in services.
-- **Error handling**: business errors throw a domain exception; let `@ControllerAdvice` translate. Do not return `null` to signal failure.
+- **Error handling**: business errors throw a domain exception; let `@ControllerAdvice` translate. Do not return `null` to signal failure (the one exception is `NextDateCalculator.next` returning `null` for "one-shot → delete").
 - **Logging**: SLF4J via `@Slf4j`. No `System.out.println` in committed code.
 
 ---
@@ -241,7 +322,7 @@ Spotbugs is configurated and working.
 - **Spring Boot 4.x renamed `-web` to `-webmvc`**. If a tutorial suggests `spring-boot-starter-web`, it is for Boot 3.x. Use `spring-boot-starter-webmvc`.
 - **Spring AI 2.0.0** has API differences vs 1.x. The Mistral integration works via OpenAI-compat mode; do not assume Anthropic/Gemini-native starters behave the same.
 - **The LLM provider is not pinned to a specific vendor** — `spring-ai-starter-model-openai` is being used as a transport. The project is currently pointed at Mistral; the commented-out lines in `application.properties` show it was on Gemini before. Treat LLM provider as a configuration concern, not a code concern.
-- **MapStruct + Lombok.** Both annotation processors share the `annotationProcessor` configuration; MapStruct 1.6 has built-in Lombok support. The generated impl uses `Reminder`'s 7-arg constructor, which is written by hand (Lombok's `@AllArgsConstructor` was replaced in TODO #6 because it null-checked `creationDate` and broke the update mapping). If a new `@Mapper` fails to compile, check that the annotation processor is on the `annotationProcessor` configuration.
+- **MapStruct + Lombok.** Both annotation processors share the `annotationProcessor` configuration; MapStruct 1.6 has built-in Lombok support. The generated impl uses `Reminder`'s 7-arg constructor, which is written by hand (Lombok's `@AllArgsConstructor` was replaced during the MVP because it null-checked `creationDate` and broke the update mapping). If a new `@Mapper` fails to compile, check that the annotation processor is on the `annotationProcessor` configuration.
 - **`ProblemDetail` serializes `properties` under a JSON key of the same name.** Clients must read `$.properties.errors`, not `$.errors`.
 - **Bean Validation messages depend on the JVM locale** (e.g. `must not be blank` vs `no debe estar vacío`). Tests must not assert on the exact message text.
 - **H2 is in-memory only.** Every restart wipes the database. Acceptable for dev, unacceptable for any persistent use.
@@ -271,8 +352,9 @@ When starting a new task in this repo, in order:
 
 1. **Propose the solution first** when the change is non-trivial, including why it fits the product direction and its tradeoffs.
 2. **Verify the baseline** with `./gradlew build`. If it does not compile or tests fail, fix the regression before adding unrelated work.
-3. **Write or update tests** alongside any non-trivial change. The project starts at 0% coverage; do not let it regress further.
-4. **Run `./gradlew build`** again after the change to confirm compilation and tests.
-5. **Do not commit** unless the user explicitly asks. Use the imperative mood in commit messages; reference any related TODO item from the list above.
+3. **Write or update tests** alongside any non-trivial change. Keep business-package line coverage at or above the 80% target; new branches in the scheduler/composer fallback chains need explicit tests.
+4. **Run `./gradlew build`** again after the change to confirm compilation, tests, spotbugs, and the JaCoCo report.
+5. **Do not commit** unless the user explicitly asks. Use the imperative mood in commit messages; reference the roadmap phase or the MVP Completion Record item when one applies.
 
-If the task is in the "Missing" TODO list, do not implement it without first confirming priority and approach with the user — many of those items have non-obvious design decisions (e.g. what `chatId` looks like when reminders are created from the web UI, not Telegram).
+If the task maps to a roadmap phase (see "What's Next"), do not implement it without first confirming priority and approach with the user — those items have non-obvious design decisions (e.g. what an explicit task state machine looks like, or what `chatId` means when reminders are created from the web UI instead of Telegram).
+

@@ -1,8 +1,7 @@
 package com.togudv.sylphy.integrations.telegram;
 
+import com.togudv.sylphy.config.ConversationIdProvider;
 import com.togudv.sylphy.service.AIService;
-import com.togudv.sylphy.service.ReminderService;
-import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
@@ -21,21 +20,18 @@ import org.telegram.telegrambots.meta.generics.TelegramClient;
 public class TelegramBotHandler implements SpringLongPollingBot, LongPollingSingleThreadUpdateConsumer {
     private final TelegramClient telegramClient;
     private final String botToken;
-    private final ReminderService reminderService;
     private final AIService aiService;
+    private final ConversationIdProvider conversationIdProvider;
 
-    @SuppressFBWarnings(
-            value = "EI2",
-            justification = "ReminderService y AIService son beans singleton gestionados por Spring; la referencia es estable por contrato del contenedor.")
     public TelegramBotHandler(
             @Value("${telegram.bot.token:}") String botToken,
             TelegramClient telegramClient,
-            ReminderService reminderService,
-            AIService aiService) {
+            AIService aiService,
+            ConversationIdProvider conversationIdProvider) {
         this.botToken = botToken;
         this.telegramClient = telegramClient;
-        this.reminderService = reminderService;
         this.aiService = aiService;
+        this.conversationIdProvider = conversationIdProvider;
     }
 
     @Override
@@ -55,7 +51,19 @@ public class TelegramBotHandler implements SpringLongPollingBot, LongPollingSing
             long chatId = update.getMessage().getChatId();
             log.info("telegram: mensaje de chat {}: {}", chatId, messageText);
 
-            String output = aiService.generate(messageText);
+            String replyToText = null;
+            if (update.getMessage().getReplyToMessage() != null
+                    && update.getMessage().getReplyToMessage().hasText()) {
+                replyToText = update.getMessage().getReplyToMessage().getText();
+            }
+
+            String output;
+            try {
+                output = aiService.generate(messageText, conversationIdProvider.getConversationId(), replyToText);
+            } catch (RuntimeException e) {
+                log.error("telegram: error al generar respuesta para chat {}", chatId, e);
+                output = "Lo siento, no pude procesar tu mensaje. Intenta de nuevo en un momento.";
+            }
 
             SendMessage message = SendMessage
                     .builder()

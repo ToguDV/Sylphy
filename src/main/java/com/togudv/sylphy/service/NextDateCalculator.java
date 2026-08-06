@@ -32,8 +32,22 @@ public class NextDateCalculator {
             case HOURLY   -> anchor.plus(interval, ChronoUnit.HOURS);
             case DAILY    -> anchor.plus(interval, ChronoUnit.DAYS);
             case WEEKLY   -> anchor.plusWeeks(interval);
-            case MONTHLY  -> anchor.plusMonths(interval);
-            case YEARLY   -> anchor.plus(interval, ChronoUnit.YEARS);
+            case MONTHLY  -> clampDayOfMonth(anchor, anchor.plusMonths(interval), cfg);
+            case YEARLY   -> clampDayOfMonth(anchor, anchor.plus(interval, ChronoUnit.YEARS), cfg);
         };
+    }
+
+    /**
+     * Ajusta el dia del mes destino al ultimo dia disponible cuando el mes
+     * destino tiene menos dias que el dia fijado por el usuario (31 ene -> 28
+     * feb -> 31 mar). Se usa el dia recordado en la configuracion, no el dia
+     * del ancla, para que un recordatorio del dia 31 no derive al dia 28 tras
+     * el primer mes corto.
+     */
+    private static LocalDateTime clampDayOfMonth(LocalDateTime anchor, LocalDateTime shifted, RecurrentConfig cfg) {
+        Integer intendedDay = cfg.getDayOfMonth();
+        int day = intendedDay == null ? anchor.getDayOfMonth() : intendedDay;
+        int lastDay = shifted.toLocalDate().lengthOfMonth();
+        return shifted.withDayOfMonth(Math.min(day, lastDay));
     }
 }

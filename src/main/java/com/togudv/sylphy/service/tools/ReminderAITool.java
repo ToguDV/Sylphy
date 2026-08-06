@@ -9,17 +9,16 @@ import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.tool.annotation.Tool;
 import org.springframework.ai.tool.annotation.ToolParam;
-import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 
 import java.time.LocalDateTime;
+import java.util.List;
 
 @Slf4j
 @Service
 public class ReminderAITool implements AITool {
     private final ReminderService reminderService;
 
-    @Autowired
     @SuppressFBWarnings(
             value = "EI2",
             justification = "ReminderService is a Spring-managed singleton bean; the reference is reference-stable by container contract.")
@@ -41,7 +40,6 @@ public class ReminderAITool implements AITool {
     public String createReminder(
             @ToolParam(description = "Nombre del recordatorio") String name,
             @ToolParam(description = "Descripcion del recordatorio") String description,
-            @ToolParam(description = "Fecha de creacion yyyy-MM-dd'T'HH:mm:ss") LocalDateTime creationDate,
             @ToolParam(description = "Fecha donde se dará el recordatorio yyyy-MM-dd'T'HH:mm:ss") LocalDateTime remindDate,
             @ToolParam(description = "Mensaje personalizado en espanol, tono cercano, segunda persona, "
                     + "que el bot enviara cuando se dispare el recordatorio") String notificationMessage,
@@ -55,16 +53,13 @@ public class ReminderAITool implements AITool {
         if (name == null || name.isBlank()) {
             throw new IllegalArgumentException("El nombre del recordatorio es obligatorio");
         }
-        if (creationDate == null) {
-            throw new IllegalArgumentException("La fecha de creacion es obligatoria");
-        }
         if (remindDate == null) {
             throw new IllegalArgumentException("La fecha del recordatorio es obligatoria");
         }
         RecurrentConfig config = frequencyType == null
                 ? null
                 : RecurrentConfig.of(frequencyType, recurrenceInterval, occurrences);
-        Reminder reminder = new Reminder(null, name, description, creationDate, remindDate, config, notificationMessage);
+        Reminder reminder = new Reminder(null, name, description, LocalDateTime.now(), remindDate, config, notificationMessage);
         reminderService.create(reminder);
         log.info("tool: recordatorio creado '{}'", name);
         return "El recordatorio: " + name + " ha sido guardado.";
@@ -73,9 +68,18 @@ public class ReminderAITool implements AITool {
     @Tool(description = "Obtiene toda la lista de recordatorios")
     public String getAllReminders()
     {
-        Iterable<Reminder> reminders = reminderService.getAll();
+        List<Reminder> reminders = reminderService.getAll();
         log.info("tool: consultados todos los recordatorios");
-        return reminders.toString();
+        if (reminders.isEmpty()) {
+            return "No hay recordatorios guardados.";
+        }
+        StringBuilder sb = new StringBuilder("Recordatorios:\n");
+        for (Reminder r : reminders) {
+            sb.append("- ").append(r.getName())
+                    .append(" (proximo: ").append(r.getNextDate()).append(')')
+                    .append('\n');
+        }
+        return sb.toString();
     }
     @Tool(description = "Obtener fecha actual, util para antes de crear un recordatorio")
     public String getCurrentDate() {

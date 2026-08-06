@@ -40,7 +40,6 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 @ExtendWith(MockitoExtension.class)
-@SuppressWarnings("removal")
 class ReminderControllerTest {
 
     @Mock
@@ -50,6 +49,7 @@ class ReminderControllerTest {
     ReminderMapper mapper = Mappers.getMapper(ReminderMapper.class);
 
     @BeforeEach
+    @SuppressWarnings("removal") // MappingJackson2HttpMessageConverter(ObjectMapper) esta marcado para removal en Spring 7; el setup standalone lo requiere.
     void setUp() {
         ObjectMapper objectMapper = new ObjectMapper();
         objectMapper.registerModule(new JavaTimeModule());

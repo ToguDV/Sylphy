@@ -1,5 +1,6 @@
 package com.togudv.sylphy.service;
 
+import com.togudv.sylphy.model.Frequency;
 import com.togudv.sylphy.model.RecurrentConfig;
 import com.togudv.sylphy.model.Reminder;
 import com.togudv.sylphy.repository.ReminderRepository;
@@ -7,7 +8,9 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDateTime;
+import java.util.List;
 import java.util.NoSuchElementException;
+import java.util.stream.StreamSupport;
 
 @Service
 @Transactional
@@ -23,6 +26,7 @@ public class ReminderService {
 
     public void create(Reminder reminder) {
         validateRecurrence(reminder.getRecurrentConfig());
+        normalizeDayOfMonth(reminder);
         repository.save(reminder);
     }
 
@@ -45,8 +49,8 @@ public class ReminderService {
         }
     }
 
-    public Iterable<Reminder> getAll() {
-        return repository.findAll();
+    public List<Reminder> getAll() {
+        return StreamSupport.stream(repository.findAll().spliterator(), false).toList();
     }
 
     public Reminder getById(Long id) {
@@ -56,6 +60,7 @@ public class ReminderService {
 
     public Reminder updateById(Long id, Reminder updated) {
         validateRecurrence(updated.getRecurrentConfig());
+        normalizeDayOfMonth(updated);
         Reminder existing = getById(id);
         existing.setName(updated.getName());
         existing.setDescription(updated.getDescription());
@@ -65,8 +70,25 @@ public class ReminderService {
         return repository.save(existing);
     }
 
+    /**
+     * Fija el dia del mes que el usuario eligio (dayOfMonth) en la configuracion
+     * de recordatorios MENSUALES y ANUALES, tomandolo del nextDate. Sin esto, un
+     * recordatorio del dia 31 derivaria al dia 28 tras el primer mes corto.
+     */
+    private static void normalizeDayOfMonth(Reminder reminder) {
+        RecurrentConfig config = reminder.getRecurrentConfig();
+        if (config == null || reminder.getNextDate() == null) {
+            return;
+        }
+        if (config.getFrequencyType() != Frequency.MONTHLY && config.getFrequencyType() != Frequency.YEARLY) {
+            return;
+        }
+        config.setDayOfMonth(reminder.getNextDate().getDayOfMonth());
+    }
+
     public void deleteById(Long id) {
-        repository.deleteById(id);
+        Reminder existing = getById(id);
+        repository.delete(existing);
     }
 
     public Reminder advanceAfterFire(Long id) {

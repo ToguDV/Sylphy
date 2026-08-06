@@ -35,19 +35,24 @@ public class ReminderScheduler {
     }
 
     private void fireAndAdvance(Reminder r) {
+        boolean allDelivered = true;
         for (NotificationDispatcher d : dispatchers) {
             try {
                 d.dispatch(r);
             } catch (RuntimeException e) {
                 log.error("scheduler: error al despachar recordatorio id={}", r.getId(), e);
-                return;
+                allDelivered = false;
             }
+        }
+        if (!allDelivered) {
+            return;
         }
         try {
             reminderService.advanceAfterFire(r.getId());
         } catch (IllegalArgumentException e) {
-            log.error("scheduler: config invalida en recordatorio id={}, se conserva sin reprogramar",
-                    r.getId(), e);
+            log.error("scheduler: config invalida en recordatorio id={}, se elimina para evitar "
+                    + "notificaciones repetidas en cada tick", r.getId(), e);
+            repository.delete(r);
         } catch (NoSuchElementException e) {
             log.warn("scheduler: recordatorio id={} desaparecio tras dispatch", r.getId());
         }

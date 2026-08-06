@@ -73,6 +73,44 @@ class ReminderServiceTest {
     }
 
     @Test
+    void create_monthly_setsDayOfMonthFromNextDate() {
+        LocalDateTime t = LocalDateTime.of(2026, 1, 31, 10, 0);
+        Reminder r = new Reminder(null, "a", null, t, t, RecurrentConfig.of(Frequency.MONTHLY, 1, null), null);
+
+        service.create(r);
+
+        assertEquals(31, r.getRecurrentConfig().getDayOfMonth());
+        verify(repository).save(r);
+    }
+
+    @Test
+    void create_daily_doesNotSetDayOfMonth() {
+        LocalDateTime t = LocalDateTime.of(2026, 1, 31, 10, 0);
+        Reminder r = new Reminder(null, "a", null, t, t, RecurrentConfig.of(Frequency.DAILY, 1, null), null);
+
+        service.create(r);
+
+        assertNull(r.getRecurrentConfig().getDayOfMonth());
+        verify(repository).save(r);
+    }
+
+    @Test
+    void updateById_monthly_resetsDayOfMonthFromNewNextDate() {
+        LocalDateTime t = LocalDateTime.of(2026, 1, 1, 10, 0);
+        Reminder existing = new Reminder(1L, "viejo", null, t, t, null, null);
+        LocalDateTime newDate = LocalDateTime.of(2026, 1, 31, 10, 0);
+        Reminder patch = new Reminder(null, "nuevo", null, t, newDate,
+                RecurrentConfig.of(Frequency.MONTHLY, 1, null), null);
+        when(repository.findById(1L)).thenReturn(java.util.Optional.of(existing));
+        when(repository.save(existing)).thenReturn(existing);
+
+        Reminder result = service.updateById(1L, patch);
+
+        assertSame(existing, result);
+        assertEquals(31, existing.getRecurrentConfig().getDayOfMonth());
+    }
+
+    @Test
     void create_rejectsOccurrencesZero() {
         Reminder r = reminder(RecurrentConfig.of(Frequency.DAILY, 1, 0));
 
@@ -180,9 +218,21 @@ class ReminderServiceTest {
 
     @Test
     void deleteById_deletes() {
+        LocalDateTime t = LocalDateTime.of(2026, 1, 1, 10, 0);
+        Reminder r = new Reminder(3L, "a", null, t, t, null, null);
+        when(repository.findById(3L)).thenReturn(java.util.Optional.of(r));
+
         service.deleteById(3L);
 
-        verify(repository).deleteById(3L);
+        verify(repository).delete(r);
+    }
+
+    @Test
+    void deleteById_throwsWhenMissing() {
+        when(repository.findById(99L)).thenReturn(java.util.Optional.empty());
+
+        assertThrows(java.util.NoSuchElementException.class, () -> service.deleteById(99L));
+        verify(repository, never()).delete(any());
     }
 
     @Test

@@ -14,6 +14,7 @@ import org.mockito.junit.jupiter.MockitoExtension;
 import java.time.LocalDateTime;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -36,10 +37,9 @@ class ReminderAIToolTest {
 
     @Test
     void buildsRecurrentConfig_whenFrequencyProvided() {
-        LocalDateTime creation = LocalDateTime.of(2026, 1, 1, 10, 0);
         LocalDateTime remind = LocalDateTime.of(2026, 1, 2, 10, 0);
 
-        tool.createReminder("medicina", "tomar pastilla", creation, remind,
+        tool.createReminder("medicina", "tomar pastilla", remind,
                 "Es hora de tomar tu pastilla", Frequency.DAILY, 2, 5);
 
         ArgumentCaptor<Reminder> captor = ArgumentCaptor.forClass(Reminder.class);
@@ -53,11 +53,23 @@ class ReminderAIToolTest {
     }
 
     @Test
-    void leavesConfigNull_whenNoFrequency() {
-        LocalDateTime creation = LocalDateTime.of(2026, 1, 1, 10, 0);
+    void creationDate_isAssignedByServer_notByCaller() {
         LocalDateTime remind = LocalDateTime.of(2026, 1, 2, 10, 0);
 
-        tool.createReminder("reunion", "reunion de equipo", creation, remind,
+        tool.createReminder("medicina", null, remind, null, null, null, null);
+
+        ArgumentCaptor<Reminder> captor = ArgumentCaptor.forClass(Reminder.class);
+        verify(reminderService).create(captor.capture());
+        Reminder saved = captor.getValue();
+        assertNotNull(saved.getCreationDate());
+        assertTrue(saved.getCreationDate().isBefore(LocalDateTime.now().plusMinutes(1)));
+    }
+
+    @Test
+    void leavesConfigNull_whenNoFrequency() {
+        LocalDateTime remind = LocalDateTime.of(2026, 1, 2, 10, 0);
+
+        tool.createReminder("reunion", "reunion de equipo", remind,
                 "Tienes una reunion", null, null, null);
 
         ArgumentCaptor<Reminder> captor = ArgumentCaptor.forClass(Reminder.class);
@@ -67,10 +79,9 @@ class ReminderAIToolTest {
 
     @Test
     void ignoresRecurrenceParams_whenFrequencyNull() {
-        LocalDateTime creation = LocalDateTime.of(2026, 1, 1, 10, 0);
         LocalDateTime remind = LocalDateTime.of(2026, 1, 2, 10, 0);
 
-        tool.createReminder("tarea", null, creation, remind, "Tienes una tarea",
+        tool.createReminder("tarea", null, remind, "Tienes una tarea",
                 null, 3, 7);
 
         ArgumentCaptor<Reminder> captor = ArgumentCaptor.forClass(Reminder.class);
@@ -80,10 +91,9 @@ class ReminderAIToolTest {
 
     @Test
     void defaultsIntervalAndOccurrences_toNullForServiceNormalization() {
-        LocalDateTime creation = LocalDateTime.of(2026, 1, 1, 10, 0);
         LocalDateTime remind = LocalDateTime.of(2026, 1, 2, 10, 0);
 
-        tool.createReminder("gimnasio", null, creation, remind,
+        tool.createReminder("gimnasio", null, remind,
                 "Es hora del gimnasio", Frequency.WEEKLY, null, null);
 
         ArgumentCaptor<Reminder> captor = ArgumentCaptor.forClass(Reminder.class);
@@ -96,9 +106,9 @@ class ReminderAIToolTest {
 
     @Test
     void returnsConfirmationMessage() {
-        LocalDateTime creation = LocalDateTime.of(2026, 1, 1, 10, 0);
+        LocalDateTime remind = LocalDateTime.of(2026, 1, 1, 10, 0);
 
-        String result = tool.createReminder("leer", null, creation, creation,
+        String result = tool.createReminder("leer", null, remind,
                 "Es hora de leer", null, null, null);
 
         assertTrue(result.contains("leer"));
@@ -109,25 +119,17 @@ class ReminderAIToolTest {
         LocalDateTime t = LocalDateTime.of(2026, 1, 1, 10, 0);
 
         assertThrows(IllegalArgumentException.class,
-                () -> tool.createReminder(" ", null, t, t, null, null, null, null));
-    }
-
-    @Test
-    void rejectsNullCreationDate() {
-        assertThrows(IllegalArgumentException.class,
-                () -> tool.createReminder("tarea", null, null, LocalDateTime.of(2026, 1, 1, 10, 0),
-                        null, null, null, null));
+                () -> tool.createReminder(" ", null, t, null, null, null, null));
     }
 
     @Test
     void rejectsNullRemindDate() {
         assertThrows(IllegalArgumentException.class,
-                () -> tool.createReminder("tarea", null, LocalDateTime.of(2026, 1, 1, 10, 0),
-                        null, null, null, null, null));
+                () -> tool.createReminder("tarea", null, null, null, null, null, null));
     }
 
     @Test
-    void getAllReminders_delegatesToService() {
+    void getAllReminders_returnsReadableList() {
         LocalDateTime t = LocalDateTime.of(2026, 1, 1, 10, 0);
         Reminder r = new Reminder(1L, "medicina", null, t, t, null, null);
         when(reminderService.getAll()).thenReturn(java.util.List.of(r));
@@ -135,6 +137,16 @@ class ReminderAIToolTest {
         String result = tool.getAllReminders();
 
         assertTrue(result.contains("medicina"));
+        assertTrue(result.contains("2026-01-01T10:00"));
+    }
+
+    @Test
+    void getAllReminders_emptyReturnsMessage() {
+        when(reminderService.getAll()).thenReturn(java.util.List.of());
+
+        String result = tool.getAllReminders();
+
+        assertEquals("No hay recordatorios guardados.", result);
     }
 
     @Test

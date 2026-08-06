@@ -38,7 +38,7 @@ public class ReminderController {
 
     @GetMapping
     public List<ReminderDTO> getAll() {
-        return ((List<Reminder>) reminderService.getAll()).stream()
+        return reminderService.getAll().stream()
                 .map(mapper::toDto)
                 .toList();
     }

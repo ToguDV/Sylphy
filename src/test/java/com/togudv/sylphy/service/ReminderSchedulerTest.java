@@ -28,6 +28,7 @@ class ReminderSchedulerTest {
     @Mock ReminderRepository repository;
     @Mock ReminderService reminderService;
     @Mock NotificationDispatcher dispatcher;
+    @Mock NotificationDispatcher secondDispatcher;
 
     ReminderScheduler scheduler;
 
@@ -73,7 +74,7 @@ class ReminderSchedulerTest {
     }
 
     @Test
-    void advanceFailure_isLoggedAndDoesNotPropagate() {
+    void advanceFailure_isLoggedAndDeletesBrokenReminder() {
         Reminder r1 = new Reminder(1L, "a", null, LocalDateTime.now(), LocalDateTime.now(), null, null);
         when(repository.findByNextDateLessThanEqual(any())).thenReturn(List.of(r1));
         doThrow(new IllegalArgumentException("bad config"))
@@ -82,6 +83,35 @@ class ReminderSchedulerTest {
         scheduler.tick();
 
         verify(dispatcher).dispatch(r1);
+        verify(reminderService).advanceAfterFire(1L);
+        verify(repository).delete(r1);
+    }
+
+    @Test
+    void oneDispatcherFailure_doesNotBlockOthers() {
+        Reminder r1 = new Reminder(1L, "a", null, LocalDateTime.now(), LocalDateTime.now(), null, null);
+        scheduler = new ReminderScheduler(repository, reminderService, List.of(dispatcher, secondDispatcher));
+        when(repository.findByNextDateLessThanEqual(any())).thenReturn(List.of(r1));
+        doThrow(new NotificationDeliveryException("boom", new RuntimeException()))
+                .when(dispatcher).dispatch(r1);
+
+        scheduler.tick();
+
+        verify(dispatcher).dispatch(r1);
+        verify(secondDispatcher).dispatch(r1);
+        verify(reminderService, never()).advanceAfterFire(any());
+    }
+
+    @Test
+    void allDispatchersSucceed_advancesReminder() {
+        Reminder r1 = new Reminder(1L, "a", null, LocalDateTime.now(), LocalDateTime.now(), null, null);
+        scheduler = new ReminderScheduler(repository, reminderService, List.of(dispatcher, secondDispatcher));
+        when(repository.findByNextDateLessThanEqual(any())).thenReturn(List.of(r1));
+
+        scheduler.tick();
+
+        verify(dispatcher).dispatch(r1);
+        verify(secondDispatcher).dispatch(r1);
         verify(reminderService).advanceAfterFire(1L);
     }
 

@@ -256,6 +256,39 @@ Implemented to give the agent a persistent conversation thread whose history is 
 
 ---
 
+## System Prompt Configurable (decision record, post-MVP)
+
+The assistant's system prompt (personality/behavior instructions) is now configurable at runtime — stored in DB, edited via REST or by chat.
+
+### Design decisions
+
+- **Single active prompt, single row.** `SystemPrompt` entity with fixed `id = 1L` (table `system_prompt`), `content` (≤10000 chars) and `updatedAt`. No versioning: PUT replaces. Coherent with the single-owner principle; adding a version history later is a separate feature.
+- **Fallback chain: BD > properties > nothing.** `SystemPromptService.getEffectivePrompt` returns the stored content if present and non-blank; otherwise `sylphy.system-prompt.default` (empty by default — set it via `.env`/properties to give the bot a personality). Rationale: H2 wipes on restart (same known limitation as reminders), so a properties default guarantees the bot never loses its base instructions. This is the first system prompt ever injected into `AIService.generate` (previously only the per-request reply-context prompt existed); both can coexist (Spring AI merges system messages).
+- **REST contract at `/api/system-prompt`:** `GET` → `SystemPromptDTO(content, updatedAt)` with `updatedAt == null` meaning "default in effect"; `PUT` with `@Valid SystemPromptUpdateDTO` (`@NotBlank @Size(max=10000)`) upserts and returns the stored state; `DELETE` (204, idempotent) clears the stored row to fall back to the default.
+- **Chat access via AI tools.** `SystemPromptAITool` (`getName()` = `system-prompt`) exposes `getSystemPrompt()` (content + source "configurado"/"por defecto"), `updateSystemPrompt(content)` (deterministic validation: non-blank, ≤10000) and `resetSystemPrompt()`. Natural language drives configuration: "cambia tu personalidad...". The LLM is not asked to edit its own prompt implicitly — only when the user asks.
+- **Prompt resolution happens per request, no cache.** One `findById` per `generate` call on H2 is negligible; caching would need invalidation on update for zero benefit today.
+
+### Coverage at implementation
+
+`SystemPromptServiceTest` (8), `SystemPromptControllerTest` (6), `SystemPromptAIToolTest` (8), `AIServiceTest` extended (7 total). Business packages all ≥80%.
+
+---
+
+## Reintentos del proveedor IA (decision record, post-MVP)
+
+OpenRouter (modelo `:free`) devuelve ocasionalmente respuestas malformadas sin el campo `choices`, que `OpenAiChatModel` rechaza con `OpenAIInvalidDataException`. `AIService.generate` reintenta ahora los errores transitorios del proveedor.
+
+- **Reintento en `AIService.generate`, configurable por properties.** `sylphy.ai.retry.max-attempts` (default 3) y `sylphy.ai.retry.delay-ms` (default 2000). El usuario no ve el fallback de Telegram ("Lo siento, no pude procesar...") a menos que el proveedor falle los 3 intentos.
+- **Clasificación de errores transitorios:** `OpenAIInvalidDataException` (respuesta malformada, caso real observado), `OpenAIRetryableException` (marcado por el SDK) y `UnexpectedStatusCodeException` con status 429 o ≥500. Cualquier otro error se propaga sin reintento.
+- **Guarda contra efectos secundarios duplicados.** Los `ToolCallback` se envuelven (`TrackingToolCallback`) para marcar en `ToolCallTracker` (ThreadLocal) que una herramienta se ejecutó. Si el fallo transitorio ocurre DESPUÉS de ejecutar alguna herramienta (2ª+ llamada del ciclo tool-calling), **no se reintenta**: el error se propaga para que el usuario repita, pero `createReminder` y demás tools con efectos nunca se re-ejecutan. El tracker se resetea al inicio de cada intento y se limpia al terminar `generate`. Tradeoff: un fallo post-herramienta de un tool de solo lectura tampoco se reintenta — conservador a propósito.
+- **Cada intento reconstruye el spec** (user + advisors + system prompts) en vez de reusar el objeto: evita acumular efectos de advisor entre intentos. Costo: 2s extra por fallo en el peor caso, bloqueando el hilo único de Telegram — tradeoff aceptado, similar a la consolidación WINDOW.
+
+### Coverage at implementation
+
+`AIServiceTest` extended (16 total; 9 nuevos: retry con `OpenAIInvalidDataException`, retry con `OpenAIRetryableException`, retry con HTTP 5xx, sin retry con HTTP 4xx, límite de intentos, sin retry para errores no transitorios, sin retry si una herramienta ya se ejecutó, limpieza del tracker tras éxito, wrapper de tracking). `ToolCallTracker` 100%, wrapper 100%. Business packages all ≥80%.
+
+---
+
 ## What's Next (post-MVP)
 
 Directional candidates, aligned with the roadmap. **Do not start any of these without confirming scope and approach with the user** — several involve real design decisions (state machines, new domain concepts, data migration).

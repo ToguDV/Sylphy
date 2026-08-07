@@ -8,10 +8,12 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.telegram.telegrambots.meta.api.methods.reactions.SetMessageReaction;
 import org.telegram.telegrambots.meta.api.methods.send.SendMessage;
 import org.telegram.telegrambots.meta.api.objects.Update;
 import org.telegram.telegrambots.meta.api.objects.chat.Chat;
 import org.telegram.telegrambots.meta.api.objects.message.Message;
+import org.telegram.telegrambots.meta.api.objects.reactions.ReactionTypeEmoji;
 import org.telegram.telegrambots.meta.exceptions.TelegramApiException;
 import org.telegram.telegrambots.meta.generics.TelegramClient;
 
@@ -49,6 +51,7 @@ class TelegramBotHandlerTest {
     void consume_sendsReplyForTextMessage() throws TelegramApiException {
         when(conversationIdProvider.getConversationId()).thenReturn("owner-1");
         Update update = textUpdate(42L, "hola");
+        update.getMessage().setMessageId(7);
         when(aiService.generate("hola", "owner-1", null)).thenReturn("respuesta");
 
         handler.consume(update);
@@ -78,6 +81,38 @@ class TelegramBotHandlerTest {
 
         verify(aiService, never()).generate(any(), any(), any());
         verifyNoInteractions(telegramClient);
+    }
+
+    @Test
+    void consume_reactsToReceivedMessage() throws TelegramApiException {
+        when(conversationIdProvider.getConversationId()).thenReturn("owner-1");
+        Update update = textUpdate(42L, "hola");
+        update.getMessage().setMessageId(7);
+        when(aiService.generate("hola", "owner-1", null)).thenReturn("respuesta");
+
+        handler.consume(update);
+
+        ArgumentCaptor<SetMessageReaction> captor = ArgumentCaptor.forClass(SetMessageReaction.class);
+        verify(telegramClient).execute(captor.capture());
+        SetMessageReaction reaction = captor.getValue();
+        assertEquals("42", reaction.getChatId());
+        assertEquals(7, reaction.getMessageId());
+        assertEquals(1, reaction.getReactionTypes().size());
+        assertEquals("👀", ((ReactionTypeEmoji) reaction.getReactionTypes().get(0)).getEmoji());
+    }
+
+    @Test
+    void consume_swallowsReactionApiException() throws TelegramApiException {
+        when(conversationIdProvider.getConversationId()).thenReturn("owner-1");
+        Update update = textUpdate(1L, "hola");
+        update.getMessage().setMessageId(7);
+        when(aiService.generate("hola", "owner-1", null)).thenReturn("respuesta");
+        doThrow(new TelegramApiException("boom")).when(telegramClient).execute(any(SetMessageReaction.class));
+
+        handler.consume(update);
+
+        verify(telegramClient).execute(any(SendMessage.class));
+        verify(aiService).generate("hola", "owner-1", null);
     }
 
     @Test

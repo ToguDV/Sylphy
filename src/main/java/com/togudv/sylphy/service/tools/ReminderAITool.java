@@ -34,9 +34,9 @@ public class ReminderAITool implements AITool {
 
     @Tool(description = "Crea y guarda un recordatorio. El campo notificationMessage es el "
             + "texto que el bot enviara al usuario cuando se dispare el recordatorio: "
-            + "redactalo en espanol, en segunda persona, con tono cercano y personal, "
-            + "mencionando el detalle concreto que pidio el usuario. Una o dos frases como "
-            + "maximo, sin markdown, sin comillas, sin emojis.")
+            + "redactalo en espanol"
+            + "Una o dos frases como "
+            + "maximo.")
     public String createReminder(
             @ToolParam(description = "Nombre del recordatorio") String name,
             @ToolParam(description = "Descripcion del recordatorio") String description,
@@ -44,11 +44,11 @@ public class ReminderAITool implements AITool {
             @ToolParam(description = "Mensaje personalizado en espanol, tono cercano, segunda persona, "
                     + "que el bot enviara cuando se dispare el recordatorio") String notificationMessage,
             @ToolParam(description = "Frecuencia de recurrencia (MINUTELY, HOURLY, DAILY, WEEKLY, MONTHLY, "
-                    + "YEARLY). null si el recordatorio es de una sola vez.") Frequency frequencyType,
+                    + "YEARLY). null si el recordatorio es de una sola vez.", required = false) Frequency frequencyType,
             @ToolParam(description = "Cada cuantas unidades de frequencyType se repite el recordatorio. "
-                    + "Solo si frequencyType no es null; si no se indica, se usa 1.") Integer recurrenceInterval,
+                    + "Solo si frequencyType no es null; si no se indica, se usa 1.", required = false) Integer recurrenceInterval,
             @ToolParam(description = "Numero total de veces que debe dispararse el recordatorio. "
-                    + "null significa indefinido. Solo si frequencyType no es null.") Integer occurrences)
+                    + "null significa indefinido. Solo si frequencyType no es null.", required = false) Integer occurrences)
     {
         if (name == null || name.isBlank()) {
             throw new IllegalArgumentException("El nombre del recordatorio es obligatorio");

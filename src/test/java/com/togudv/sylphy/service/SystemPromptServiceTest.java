@@ -5,9 +5,13 @@ import com.togudv.sylphy.repository.SystemPromptRepository;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.api.io.TempDir;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.time.LocalDateTime;
 import java.util.Optional;
 
@@ -22,14 +26,19 @@ import static org.mockito.Mockito.when;
 @ExtendWith(MockitoExtension.class)
 class SystemPromptServiceTest {
 
+    @TempDir
+    Path tempDir;
+
     @Mock
     SystemPromptRepository repository;
 
     SystemPromptService service;
 
     @BeforeEach
-    void setUp() {
-        service = new SystemPromptService(repository, "prompt por defecto");
+    void setUp() throws IOException {
+        Path promptFile = tempDir.resolve("system-prompt.txt");
+        Files.writeString(promptFile, "prompt por defecto");
+        service = new SystemPromptService(repository, promptFile.toString());
     }
 
     @Test
@@ -42,19 +51,44 @@ class SystemPromptServiceTest {
     }
 
     @Test
-    void getEffectivePrompt_fallsBackToDefaultWhenNoRow() {
+    void getEffectivePrompt_fallsBackToFileDefaultWhenNoRow() {
         when(repository.findById(SystemPrompt.FIXED_ID)).thenReturn(Optional.empty());
 
         assertEquals("prompt por defecto", service.getEffectivePrompt());
     }
 
     @Test
-    void getEffectivePrompt_fallsBackToDefaultWhenStoredBlank() {
+    void getEffectivePrompt_fallsBackToFileDefaultWhenStoredBlank() {
         SystemPrompt stored = new SystemPrompt(SystemPrompt.FIXED_ID, "   ",
                 LocalDateTime.of(2026, 8, 6, 12, 0));
         when(repository.findById(SystemPrompt.FIXED_ID)).thenReturn(Optional.of(stored));
 
         assertEquals("prompt por defecto", service.getEffectivePrompt());
+    }
+
+    @Test
+    void getEffectivePrompt_returnsEmptyWhenFileMissing() {
+        service = new SystemPromptService(repository, tempDir.resolve("no-existe.txt").toString());
+        when(repository.findById(SystemPrompt.FIXED_ID)).thenReturn(Optional.empty());
+
+        assertEquals("", service.getEffectivePrompt());
+    }
+
+    @Test
+    void getEffectivePrompt_returnsEmptyWhenFileBlank() throws IOException {
+        Files.writeString(tempDir.resolve("system-prompt.txt"), "   \n");
+        when(repository.findById(SystemPrompt.FIXED_ID)).thenReturn(Optional.empty());
+
+        assertEquals("", service.getEffectivePrompt());
+    }
+
+    @Test
+    void getEffectivePrompt_readsFileFreshAfterEdit() throws IOException {
+        when(repository.findById(SystemPrompt.FIXED_ID)).thenReturn(Optional.empty());
+
+        Files.writeString(tempDir.resolve("system-prompt.txt"), "prompt editado");
+
+        assertEquals("prompt editado", service.getEffectivePrompt());
     }
 
     @Test

@@ -47,7 +47,8 @@ public class AIService {
 
         this.chatClient = chatClientBuilder
                 .defaultOptions(OpenAiChatOptions.builder()
-                        .temperature(0.8))
+                        .temperature(0.8)
+                        .reasoningEffort("max"))
                 .defaultAdvisors(MessageChatMemoryAdvisor.builder(chatMemory).build())
                 .defaultTools(provider)
                 .build();

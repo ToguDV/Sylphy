@@ -1,14 +1,19 @@
 package com.togudv.sylphy.service.notification;
 
+import com.togudv.sylphy.config.ConversationIdProvider;
 import com.togudv.sylphy.config.NotificationDestination;
 import com.togudv.sylphy.model.Reminder;
 import com.togudv.sylphy.service.ReminderMessageComposer;
+import com.togudv.sylphy.service.conversation.JpaChatMemory;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.ai.chat.messages.AssistantMessage;
 import org.springframework.stereotype.Component;
 import org.telegram.telegrambots.meta.api.methods.send.SendMessage;
 import org.telegram.telegrambots.meta.exceptions.TelegramApiException;
 import org.telegram.telegrambots.meta.generics.TelegramClient;
+
+import java.util.List;
 
 @Slf4j
 @Component
@@ -18,6 +23,8 @@ public class TelegramNotificationDispatcher implements NotificationDispatcher {
     private final TelegramClient telegramClient;
     private final NotificationDestination destination;
     private final ReminderMessageComposer composer;
+    private final JpaChatMemory chatMemory;
+    private final ConversationIdProvider conversationIdProvider;
 
     @Override
     public void dispatch(Reminder reminder) {
@@ -28,6 +35,7 @@ public class TelegramNotificationDispatcher implements NotificationDispatcher {
                 .build();
         try {
             telegramClient.execute(message);
+            recordInHistory(text, reminder.getId());
             log.info("telegram: notificacion enviada para recordatorio id={}", reminder.getId());
         } catch (TelegramApiException e) {
             log.error("telegram: error al enviar notificacion para recordatorio id={}",
@@ -35,6 +43,22 @@ public class TelegramNotificationDispatcher implements NotificationDispatcher {
             throw new NotificationDeliveryException(
                     "Fallo al enviar notificacion Telegram para recordatorio id="
                             + reminder.getId(), e);
+        }
+    }
+
+    /**
+     * Registra en el historial compartido el texto real entregado, como
+     * mensaje del asistente, para que el hilo de conversacion sea coherente
+     * con lo que el usuario recibio. Un fallo aqui nunca debe marcar el envio
+     * como fallido (eso provocaria reenvios duplicados en el siguiente tick).
+     */
+    private void recordInHistory(String text, Long reminderId) {
+        try {
+            chatMemory.add(conversationIdProvider.getConversationId(),
+                    List.of(new AssistantMessage(text)));
+        } catch (RuntimeException e) {
+            log.warn("telegram: no se pudo registrar en el historial la notificacion "
+                    + "para recordatorio id={}", reminderId, e);
         }
     }
 

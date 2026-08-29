@@ -1,4 +1,5 @@
 .env
+system-prompt.txt
 HELP.md
 .gradle
 build/

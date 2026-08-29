@@ -1,20 +1,12 @@
 package com.togudv.sylphy.dto;
 
 import com.togudv.sylphy.model.Frequency;
-
-import java.time.DayOfWeek;
-import java.util.Set;
+import jakarta.validation.constraints.Min;
 
 public record RecurrentConfigDTO(
-        Set<Frequency> frequencyType,
+        Frequency frequencyType,
+        @Min(1)
         Integer recurrenceInterval,
-        Set<DayOfWeek> daysOfWeek,
-        Set<Integer> daysOfMonth,
+        @Min(1)
         Integer occurrences
-) {
-    public RecurrentConfigDTO {
-        frequencyType = frequencyType == null ? null : Set.copyOf(frequencyType);
-        daysOfWeek = daysOfWeek == null ? null : Set.copyOf(daysOfWeek);
-        daysOfMonth = daysOfMonth == null ? null : Set.copyOf(daysOfMonth);
-    }
-}
+) {}

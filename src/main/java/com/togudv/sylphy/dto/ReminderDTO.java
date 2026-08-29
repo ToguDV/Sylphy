@@ -1,17 +1,12 @@
 package com.togudv.sylphy.dto;
 
-import jakarta.validation.constraints.Future;
-import jakarta.validation.constraints.NotBlank;
-import jakarta.validation.constraints.NotNull;
-
 import java.time.LocalDateTime;
 
-public record CreateReminderDTO(
-        @NotBlank
+public record ReminderDTO(
+        Long id,
         String name,
         String description,
-        @NotNull
-        @Future
+        LocalDateTime creationDate,
         LocalDateTime nextDate,
         RecurrentConfigDTO recurrentConfig,
         String notificationMessage

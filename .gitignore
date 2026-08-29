@@ -1,5 +1,5 @@
 .env
-AGENTS.md
+system-prompt.txt
 HELP.md
 .gradle
 build/
